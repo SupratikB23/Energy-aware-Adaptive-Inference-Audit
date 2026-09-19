@@ -255,3 +255,31 @@ marginal-utility point's accuracy):
 | `results/runs/ltt_a001_oldgrid.json` (= `results/ltt_cifar10_resnet14.json`) | α = 0.01, old τ grid |
 | `results/runs/ltt_a00{1,2,3,5}/ltt_cifar10_resnet14.json` | α sweep, τ grid up to 0.999 |
 | `results/runs/eval_run{1,2}/eval_cifar10_resnet14.json` | C2/C3 benchmark (git `5eacc30`), two independent runs |
+
+---
+
+## 10. Phase 2, preliminary: Step 5 policy re-analysis (real CIFAR-10, run on the analysis machine)
+Same `exit_kd` checkpoint and deploy split. Policies are priced with the run1+run2 **pooled** batch-1
+cascade table: 14.18 / 17.99 / 45.19 / 93.62 mJ per sample (between-run CV 18.4 / 0.8 / 6.3 / 18.7 %).
+Deploy accuracy per head: 80.08 / 84.96 / 91.08 / 92.22 %. New: a per-head-threshold baseline (tuned
+on the calibration split only) and a FLOP-cost sensitivity view.
+
+| Matched-accuracy comparison (step rule) | Measured-J pricing: wins, median saving | FLOP pricing: wins, median saving |
+|---|---|---|
+| Marginal-utility vs global confidence | 9/12, **17.7 %** (range −44.6 … +31.2) | 8/12, **2.1 %** |
+| Per-head thresholds vs global confidence | 11/12, **16.0 %** (0 … 19.7) | 11/12, **1.7 %** |
+| Marginal-utility vs per-head (grid-tuned) | 7/10, 8.5 % | 9/12, 1.8 % |
+
+- **Measured pricing changes which policy is best, by about 8×.** With FLOP costs, every policy
+  family lands within ~2 % of global confidence thresholds. With measured Joules, flexible per-head
+  rules (marginal-utility or per-head thresholds) save 16–18 % at matched accuracy. This is the RQ4 / C3 result.
+- At full-model accuracy (92.24 %), marginal-utility costs 41.1 mJ/sample vs 59.7 mJ for the cheapest
+  global-confidence setting that matches it (τ = 0.999): **31 % less**.
+- Marginal-utility = per-head thresholds (proved in `test_units.py`). Its edge over the *grid-tuned*
+  per-head baseline comes from how it is parameterised: thresholds derived from gain/cost are
+  continuous and use one knob, while the 2744-point grid search overfits calibration.
+- **Why measured pricing matters here:** measured head 0 → 1 costs 4.1 % of the full model, vs
+  18 % by FLOPs, so continuing past head 0 is nearly free at batch 1.
+- **The caveat still stands:** that head 0 → 1 gap is the difference KILL-2 found unresolvable at
+  batch 1 (exit-0 between-run CV 18 %). Step 8 (clock-locked, 10 repeats) decides whether this result
+  is robust or a DVFS artefact. Until then, report it as preliminary.
