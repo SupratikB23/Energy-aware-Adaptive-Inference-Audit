@@ -1,0 +1,64 @@
+# Single config for the whole project. Override via CLI flags where supported.
+# All energy numbers are JOULES unless noted. Keep batch lists small on 8GB.
+
+project: percom2027-energy-audit
+seed: 42
+device: auto            # auto | cuda | cpu
+data_root: ./data
+results_root: ./results
+
+# --- datasets ---
+# cifar10 = dev track. kws (SpeechCommands) / har (UCI-HAR) = pervasive track for PerConAI fit.
+dataset: cifar10         # cifar10 | kws | har
+num_classes: 10
+in_channels: 3          # cifar10=3, kws=1 (melspec), har=9 (sensors) — overridden by train.py per dataset
+image_size: 32
+
+# --- models (all fit in 8GB; see src/models.py) ---
+# teacher: resnet34 | resnet18 | tinycnn
+# student: resnet14 | resnet18small | dscnn-s | harcnn
+teacher: resnet18
+student: resnet14
+early_exits: 3          # exits after stage1, stage2, stage3 (+ final head)
+
+# --- training (8GB-safe defaults) ---
+train:
+  epochs_teacher: 20
+  epochs_student: 20
+  epochs_exit: 20
+  batch_size: 64        # train batch; 128 only if VRAM allows, see RUN_PLAN.md
+  num_workers: 0        # 0 on Windows box; raise to 2 on Linux if RAM allows
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 5e-4
+  amp: true             # torch.cuda.amp; no-op on CPU
+  grad_accum: 1         # raise to 2 if you must emulate batch 128 in 8GB
+  kd_alpha: 0.7         # weight on distillation vs hard labels
+  kd_temp: 4.0
+  exit_weights: [0.3, 0.3, 0.4, 1.0]  # w1,w2,w3,final for exit-aware KD
+
+# --- measurement (C1 protocol, verdict S4) ---
+measure:
+  poll_hz: 150.0        # 100-200 Hz background power polling fallback
+  idle_seconds: 60      # idle baseline duration on GPU box (10s only for smoke test)
+  warmup_seconds: 120   # matmul warmup before timed windows (evaluate.py gpu_warmup)
+  min_iters: 1000       # NEVER single-shot; loop >=1000 for per-exit windows
+  min_window_seconds: 3.0   # AND each window >= this long (NVML update granularity)
+  dummy_seconds: 10.0   # dummy-kernel validation window (after 2s pre-warm)
+  dummy_max_residual: 0.05  # abort if |E_counter - E_poll|/E_counter > 5%
+
+# --- evaluation (C2 regime map + C3 policies) ---
+eval:
+  batches: [1, 8, 16, 32, 64]
+  thresholds: [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+  # marginal-utility knob, UNIT-FREE: accuracy gain per fraction of full-model cost.
+  # evaluate.py adds quantiles of the calibration gain/cost ratios to this grid.
+  lambdas: [0.001, 0.005, 0.01, 0.02, 0.05]
+  repeats: 3            # energy windows per exit -> mean +- std (KILL-2 3-sigma test)
+  iters_per_exit: 1000  # minimum iters per energy window
+
+# --- LTT calibration (C4 deferred; stub values kept for API stability) ---
+ltt:
+  alpha: 0.01           # max allowed extra error vs full model
+  delta: 0.10           # 1-delta = 90% confidence
+  calib_split: 0.5      # fraction of held-out set used for calibration

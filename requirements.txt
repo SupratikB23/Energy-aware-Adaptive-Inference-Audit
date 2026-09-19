@@ -1,0 +1,19 @@
+# PerCom 2027 measured-energy audit — pinned runtime for 8GB RTX box.
+# Install on GPU BOX with:  pip install -r requirements.txt
+# This CPU-only dev machine already has torch+cpu; nvidia-ml-py is optional here
+# (test_smoke.py skips GPU checks if it is missing) but REQUIRED on the GPU box.
+#
+# For CUDA builds, install torch/torchvision matching your CUDA first, e.g.:
+#   RTX 20/30/40: pip install "torch>=2.7,<2.9" "torchvision>=0.22,<0.24" --index-url https://download.pytorch.org/whl/cu126
+#   RTX 50 (sm_120): same but --index-url https://download.pytorch.org/whl/cu128 (cu12x<128 has no sm_120 kernels)
+# then: pip install -r requirements.txt
+
+torch>=2.2,<2.9
+torchvision>=0.17,<0.24   # 0.22<->torch2.7, 0.23<->torch2.8
+numpy>=1.24
+pyyaml>=6.0
+tqdm>=4.64
+matplotlib>=3.6
+nvidia-ml-py>=13.610.43
+# Optional, only after raw NVML is validated (see RUN_PLAN.md Phase 1):
+# ml-energy-zeus==0.16.0
