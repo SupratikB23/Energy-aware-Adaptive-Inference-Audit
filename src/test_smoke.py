@@ -46,8 +46,8 @@ def t_config():
 
 
 def t_imports():
-    import utils, measure, models, train, calibrate, evaluate, check_gpu  # noqa: F401
-    return "7 modules import clean"
+    import utils, measure, models, train, calibrate, evaluate, check_gpu, e2e_policy  # noqa: F401
+    return "8 modules import clean"
 
 
 def t_integrate():
@@ -192,7 +192,7 @@ def t_files():
     root = Path(__file__).resolve().parent.parent
     for f in ("config.yaml", "requirements.txt", ".gitignore", "README.md", "AGENTS.md",
               "src/utils.py", "src/measure.py", "src/models.py", "src/train.py",
-              "src/calibrate.py", "src/evaluate.py", "src/check_gpu.py"):
+              "src/calibrate.py", "src/evaluate.py", "src/check_gpu.py", "src/e2e_policy.py"):
         assert (root / f).exists(), f"missing {f}"
     for frozen in ("percom2027_literature_matrix_and_verdict.md", "notebook.py"):
         assert (root / frozen).exists(), f"frozen input missing: {frozen}"
