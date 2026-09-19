@@ -1,7 +1,8 @@
 # RESULTS — measured-energy audit of early-exit policies (CIFAR-10, RTX 3070)
 
-Scope: first complete pass of RUN_PLAN Steps 1–4 on one GPU box. All numbers below are
-read from `results/` (files listed in §9). Research framing and kill criteria:
+Scope: RUN_PLAN Phase 1 (Steps 1–4) **and Phase 2 (Steps 5, 7, 8)** on one GPU box. All numbers
+below are read from `results/` (files listed in §9 and §10.8). §0 is the current verdict; §10 holds
+the Phase 2 results. **Step 6 (CIFAR end-to-end) has not been run yet.** Research framing and kill criteria:
 [percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md).
 
 **Setup.** NVIDIA GeForce RTX 3070 (8 GB, sm_86, 270 W limit), driver 591.86, torch 2.7.0+cu126,
@@ -22,12 +23,21 @@ and ≥3 s, round-robin order. Two independent full benchmark runs (`eval_run1`,
 | KILL-2 at batch ≥16 | all adjacent exits resolvable, both runs, both modes | ✅ |
 | **KILL-3** measured Joule order ≠ FLOP order | **no** significant disagreement at any batch, either run | ❌ FIRES → drop the "FLOPs get the *order* wrong" claim |
 | FLOPs predict the *size* of savings | **no**: off by −7 to +17 pts, sign flips with batch size (§4) | ✅ usable claim |
-| **KILL-4** marginal-utility beats confidence at matched accuracy | 10–31 % cheaper in both runs (mid/low-accuracy range), with serious caveats (§6) | ⚠️ PASS, weak |
-| LTT accuracy-risk guarantee holds on held-out split | yes for α = 0.02 / 0.03 / 0.05; α = 0.01 uncertifiable | ✅ |
+| **KILL-4** marginal-utility beats confidence at matched accuracy (CIFAR) | median 9.9 % (locked clocks) to 20.5 % (unlocked) cheaper, vs ~2 % under FLOP pricing (§10.5) | ✅ PASS, modest |
+| LTT accuracy-risk guarantee holds on held-out split | CIFAR α = 0.02 / 0.03 / 0.05 and HAR α = 0.03 / 0.05; α = 0.01 uncertifiable | ✅ |
+| **Phase 2:** locked clocks restore batch-1 measurability | batch-1 cascade: 0/3 → 3/3 adjacent exits resolvable; identical-workload mismatch 16–54 % → 7 % | ✅ (§10.2) |
+| **Phase 2:** early exit saves energy end to end (HAR, real runtime) | **No.** Costs +19 … +241 % more than the full model at batch 1–32; saves ≤ 24 % only at batch 64 | ❌ key finding (§10.4) |
+| **Phase 2:** FLOPs predict end-to-end policy energy (HAR) | off by −58 to −95 % (FLOPs predict savings that never appear) | ❌ key finding (§10.4) |
+| CIFAR end-to-end policy energy (Step 6) | **not run** | ⏳ missing |
 
-**Headline:** the measurement protocol works (C1), and the regime map (C2) has a clear, reproducible
-story. But **batching, not early exit, dominates energy per sample on this GPU**, and batch-1
-per-exit energy is too noisy to support fine-grained per-exit policy claims.
+**Headline (after Phase 2):**
+- The measurement protocol works, but only with **locked GPU clocks** at batch 1 (C1).
+- Batching dominates exit depth.
+- FLOPs misjudge the size of early-exit savings. On a **pervasive-scale** model (HAR, 97 k params) the
+  gap is extreme: FLOPs promise ~90 % savings, while the real early-exit runtime **costs more energy
+  than the full model** unless the batch is large.
+- A measured cost term makes flexible exit rules worth ~10 % at matched accuracy, where FLOP pricing
+  says they are worth ~2 %.
 
 ---
 
@@ -258,28 +268,141 @@ marginal-utility point's accuracy):
 
 ---
 
-## 10. Phase 2, preliminary: Step 5 policy re-analysis (real CIFAR-10, run on the analysis machine)
-Same `exit_kd` checkpoint and deploy split. Policies are priced with the run1+run2 **pooled** batch-1
-cascade table: 14.18 / 17.99 / 45.19 / 93.62 mJ per sample (between-run CV 18.4 / 0.8 / 6.3 / 18.7 %).
-Deploy accuracy per head: 80.08 / 84.96 / 91.08 / 92.22 %. New: a per-head-threshold baseline (tuned
-on the calibration split only) and a FLOP-cost sensitivity view.
+## 10. Phase 2 results (GPU box, git `e83076f`)
 
-| Matched-accuracy comparison (step rule) | Measured-J pricing: wins, median saving | FLOP pricing: wins, median saving |
+### 10.1 Step 5 on the GPU box reproduces the local analysis
+`runs/policy_pooled` (GPU, real CIFAR-10, run1+run2 pooled batch-1 cascade table
+14.18 / 17.99 / 45.19 / 93.62 mJ) gives the same KILL-4 answer as the CPU re-analysis:
+- marginal-utility vs global confidence: 9/12 wins, median **17.7 %** (FLOP pricing: 1.7 %);
+- per-head vs global confidence: 11/12, median 15.1 % (FLOP pricing: 1.8 %).
+
+### 10.2 C1: clock locking fixes batch-1 measurement (Step 8, 10 repeats)
+| Batch-1, cascade | Unlocked (`eval_b1b8_unlocked_r10`) | Locked 1500 MHz (`eval_b1b8_locked1500`) |
 |---|---|---|
-| Marginal-utility vs global confidence | 9/12, **17.7 %** (range −44.6 … +31.2) | 8/12, **2.1 %** |
-| Per-head thresholds vs global confidence | 11/12, **16.0 %** (0 … 19.7) | 11/12, **1.7 %** |
-| Marginal-utility vs per-head (grid-tuned) | 7/10, 8.5 % | 9/12, 1.8 % |
+| Graphics clock during windows | 855–1935 MHz | **1500–1500 MHz** |
+| Per-exit CV (%) | 23.5 / 40.7 / 3.4 / 26.0 | **6.7 / 10.7 / 5.3 / 3.9** |
+| Adjacent exits resolvable (>3σ) | ✗ ✗ ✗ | **✓ ✓ ✓** |
+| mJ/sample (exit 0 … full) | 13.85 / 19.02 / 41.69 / 85.35 | 14.92 / 23.13 / 50.88 / 80.17 |
 
-- **Measured pricing changes which policy is best, by about 8×.** With FLOP costs, every policy
-  family lands within ~2 % of global confidence thresholds. With measured Joules, flexible per-head
-  rules (marginal-utility or per-head thresholds) save 16–18 % at matched accuracy. This is the RQ4 / C3 result.
-- At full-model accuracy (92.24 %), marginal-utility costs 41.1 mJ/sample vs 59.7 mJ for the cheapest
-  global-confidence setting that matches it (τ = 0.999): **31 % less**.
-- Marginal-utility = per-head thresholds (proved in `test_units.py`). Its edge over the *grid-tuned*
-  per-head baseline comes from how it is parameterised: thresholds derived from gain/cost are
-  continuous and use one knob, while the 2744-point grid search overfits calibration.
-- **Why measured pricing matters here:** measured head 0 → 1 costs 4.1 % of the full model, vs
-  18 % by FLOPs, so continuing past head 0 is nearly free at batch 1.
-- **The caveat still stands:** that head 0 → 1 gap is the difference KILL-2 found unresolvable at
-  batch 1 (exit-0 between-run CV 18 %). Step 8 (clock-locked, 10 repeats) decides whether this result
-  is robust or a DVFS artefact. Until then, report it as preliminary.
+**Identical-workload test.** Exit 0 "prefix" and exit 0 "cascade" execute exactly the same
+computation, so they must measure the same. Their disagreement:
+
+| Run | batch 1 | batch 8 | batch ≥16 |
+|---|---|---|---|
+| CIFAR run1 / run2 (unlocked, 3 repeats) | 15.6 % / 54.1 % | 13.9 % / 17.5 % | 0.1–3.0 % |
+| CIFAR unlocked, 10 repeats | 24.8 % | 6.8 % | – |
+| **CIFAR locked 1500 MHz, 10 repeats** | **7.4 %** | **2.8 %** | – |
+| HAR (unlocked) | **90.1 %** | 1.8 % | 0.7–22.5 % |
+
+- On this GPU, batch-1 per-exit energy is **not reproducible under default DVFS**, even with
+  repeats. Locking the graphics clock brings it to single-digit error.
+- The locked run still leaves prefix exit 0↔1 unresolved (CV 14–15 %). The cascade table is clean.
+- Side effect: at batch 8, the locked run measured ~40–45 % less marginal energy per sample than
+  default boost (e.g. full model 13.2 vs 23.9 mJ). Idle power differs (29.1 W locked vs 24.3 W
+  unlocked), so compare this cautiously. It is consistent with DVFS literature (arxiv:2501.08219).
+- KILL-3 unchanged: no significant FLOP-order disagreement in either run. At batch 1, FLOPs
+  **understate** exit savings (−21 to −42 pts); at batch 8 by −4 to −21 pts.
+
+### 10.3 Pervasive track: real UCI-HAR (Step 7)
+Official subject-disjoint split, 7352 train / 2947 test windows (9 inertial channels × 128 samples),
+6 activities. `synthetic_data: false` everywhere.
+
+| Model | Head 0 | Head 1 | Final | Params / MFLOPs |
+|---|---|---|---|---|
+| Teacher ResNet-18 | – | – | 92.74 % | 11 M / 254 |
+| `exit_ce` HAR-CNN | 91.65 % | 92.50 % | **93.42 %** | 97 k / 3.87 |
+| `exit_kd` HAR-CNN | 91.86 % | 92.40 % | 92.67 % | 97 k / 3.87 |
+
+- **KD does not help on HAR.** The teacher (92.7 %) is *weaker* than the small student trained with
+  plain CE (93.4 %), so distilling from it costs 0.75 pts. Say so; use `exit_ce` as the stronger
+  HAR baseline in the paper, or report both.
+- Head 0 is already 91.9 % (only ~1.3 pts below the final head) at 8.6 % of the FLOPs. On paper, this
+  task is ideal for early exit.
+- LTT (calibration n = 1473, δ = 0.1): α = 0.03 certifies τ = 0.93 (deploy: 92.74 %, −0.41 pts,
+  87 % exit early, risk 0.41 % ≤ 3 % ✅). α = 0.05 certifies τ = 0.60 (−1.02 pts, 99 % exit early ✅).
+
+Per-exit energy (`runs/har_eval`, unlocked, prefix mode, mJ per sample):
+
+| Batch | Exit 0 | Exit 1 | Full | Exit 0 as % of full (FLOPs: 8.6 %) | FLOP-saving error |
+|---|---|---|---|---|---|
+| 1 | 4.31 (CV 96 %) | 4.22 | 5.48 | 78.6 % | +70 pts |
+| 8 | 0.199 | 0.365 | 0.531 | 37.5 % | +29 pts |
+| 16 | 0.100 | 0.171 | 0.261 | 38.4 % | +30 pts |
+| 32 | 0.063 | 0.128 | 0.184 | 34.5 % | +26 pts |
+| 64 | 0.077 | 0.137 | 0.248 | 30.8 % | +22 pts |
+
+- For a pervasive-scale model, **FLOPs overstate the saving of exiting at every batch size**, by
+  22–70 points. That is the opposite sign to CIFAR at small batch. Fixed per-launch costs dominate a
+  3.9 MFLOP network.
+- The GPU never leaves low clocks for this model (435–1380 MHz), so every HAR cell is
+  `clock_stable: false`.
+- Batching: full model 5.48 → 0.25 mJ/sample from batch 1 to 64 (**22×**). Exit 0 at batch 1 costs
+  17× the full model at batch 64.
+
+### 10.4 End-to-end policy energy on HAR (the real runtime; `e2e_har_harcnn.json`)
+Deploy split, 1474 windows. The runtime reproduces the offline policy exactly (runtime accuracy =
+offline accuracy for every policy and mode). Energy is measured J/sample for the whole policy, vs the
+full model at the same batch size:
+
+| Policy (deploy acc) | b = 1 | b = 8 | b = 16 | b = 32 | b = 64 |
+|---|---|---|---|---|---|
+| Full model (93.15 %) | 5.42 mJ | 0.685 | 0.332 | 0.358 | 0.346 |
+| conf τ = 0.90 (92.67 %, 87 % exit at head 0) | **+52 %** | +130 % | +172 % | +110 % | +15 % |
+| conf τ = 0.99 (92.88 %) | +71 % | +172 % | +188 % | +52 % | **−13 %** |
+| per-head 0.6/0.6 (92.13 %) | +19 % | +36 % | +85 % | −9 % | **−24 %** |
+
+(Compaction runtime shown. Positive = early exit costs MORE than the full model.)
+
+- **Early exit loses energy end to end on HAR at batch 1–16 for every policy tested**, although
+  67–97 % of inputs leave early and FLOPs predict ~88–95 % savings. The FLOP prediction of policy
+  energy is off by **−58 % to −95 %** in every cell.
+- Mechanism: for a 3.9 MFLOP network, each exit adds kernel launches plus a host-side decision
+  (`nonzero` / `.item()` sync). That costs more than the convolutions it skips, and the sync stalls
+  keep the GPU at 435–600 MHz. Latency goes up too (batch 1: 0.54 → 0.90 ms/sample at τ = 0.9).
+- Early exit pays only at batch 64, with aggressive thresholds: per-head 0.6/0.6 saves 24 % for a
+  1.0-pt accuracy loss.
+- Compaction beats batch-wait in 20 of 24 cells, by up to ~24 % at batch 64.
+- **Missing:** the per-exit-*table* comparison (`tableErr`). The run did not get `--eval-json`, and it
+  was saved to `results/` instead of `runs/e2e_har`. Rerun needed (§10.7).
+
+### 10.5 Is the CIFAR policy result robust? (KILL-4 re-priced with each cost table)
+Real CIFAR deploy split. Median saving at matched accuracy vs global confidence (wins / points):
+
+| Cost table (batch-1 cascade) | Marginal-utility | Per-head | FLOP pricing (both) |
+|---|---|---|---|
+| run1+run2 pooled (unlocked, 3 repeats) | 17.7 % (9/12) | 15.1 % (11/12) | 1.7–2.1 % |
+| unlocked, 10 repeats | 20.5 % (9/12) | 15.9 % (11/12) | 1.7–2.1 % |
+| **locked 1500 MHz, 10 repeats** | **9.9 % (9/12)** | **9.8 % (11/12)** | 1.7–2.1 % |
+
+- **It survives, but halves under the trustworthy (locked) table.** Honest claim: *measured
+  pricing makes flexible per-head exit rules worth ~10 % at matched accuracy, where FLOP pricing says
+  ~2 %*.
+- Marginal-utility ≈ per-head thresholds (identical rule). Under locked costs they tie (9.9 vs 9.8 %).
+- HAR KILL-4 (`runs/har_eval`) is not interpretable: its batch-1 cost table fails the
+  identical-workload test (90 % mismatch), and §10.4 shows early exit does not pay there at batch 1 anyway.
+
+### 10.6 Consolidated claims for the paper
+1. **C1:** the NVML counter is valid under load (0.16 %). But batch-1 per-exit energy on a desktop GPU is
+   **not reproducible under default DVFS** (identical workloads differ by 16–90 %). Locking clocks
+   restores it (7 %, all exits resolvable).
+2. **C2:** FLOPs preserve exit *order* but misstate the *size* of savings. The direction depends on model
+   scale and batch: CIFAR-ResNet −42 … +7 pts; HAR-CNN +22 … +70 pts. Batching the full model beats
+   every early exit at batch 1 (CIFAR 4.9–6.7×, HAR 22×).
+3. **C3 (headline):** for the pervasive-scale model, the **real early-exit runtime costs more energy than
+   the full model** at batch 1–16, contradicting FLOP-based estimates by 58–95 %.
+4. **C4:** a measured cost term turns a ~2 % policy difference into ~10 % (locked). Marginal-utility adds
+   nothing over per-head thresholds.
+
+### 10.7 What is still missing (priority order)
+1. **CIFAR end-to-end (Step 6)** has never been run. Without it, C3 rests on HAR only. ~15 min.
+2. **HAR end-to-end rerun with `--eval-json` and `--results`**, so table-prediction error is reported. ~10 min.
+3. **End-to-end with locked clocks** (at least HAR at batch 1 and 8): shows C3 is not a DVFS artefact. ~10 min.
+4. Seeds / variance: one training seed per model, and HAR accuracy moves ±1 pt across epochs.
+5. One GPU model, Windows, ~19 background GPU processes (idle stable to ±0.2 W across runs).
+
+### 10.8 Phase 2 files analysed
+`runs/policy_pooled/`, `runs/eval_b1b8_unlocked_r10/`, `runs/eval_b1b8_locked1500/`,
+`runs/har_eval/`, `runs/har_ltt_a003/`, `runs/har_ltt_a005/`,
+`har_{teacher_resnet18,exit_kd_harcnn,exit_ce_harcnn}_e20_b64.json`, `e2e_har_harcnn.json`.
+Local re-pricing (CPU, same checkpoint, real CIFAR-10) with the locked and r10 cost tables produced
+the §10.5 rows.
