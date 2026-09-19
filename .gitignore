@@ -1,6 +1,7 @@
 # ---- generated artifacts: never commit ----
 data/
 results/
+results_old/
 *.pt
 *.pth
 *.ckpt
