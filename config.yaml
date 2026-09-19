@@ -50,7 +50,8 @@ measure:
 # --- evaluation (C2 regime map + C3 policies) ---
 eval:
   batches: [1, 8, 16, 32, 64]
-  thresholds: [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]
+  # high taus needed: early heads are overconfident (cifar10 run: tau=0.9 still 2.6% extra err)
+  thresholds: [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.93, 0.95, 0.97, 0.98, 0.99, 0.995, 0.999]
   # marginal-utility knob, UNIT-FREE: accuracy gain per fraction of full-model cost.
   # evaluate.py adds quantiles of the calibration gain/cost ratios to this grid.
   lambdas: [0.001, 0.005, 0.01, 0.02, 0.05]
