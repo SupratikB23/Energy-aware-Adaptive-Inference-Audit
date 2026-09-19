@@ -6,6 +6,9 @@ See `RUN_PLAN.md` for the exact GPU-box run order. See `AGENTS.md` for AI rules.
 Research statement and controlling verdicts (C1-C4, kill criteria):
 [percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md)
 
+Current framing (v2): [RESEARCH_STATEMENT.md](RESEARCH_STATEMENT.md) ·
+first RTX 3070 results: [RESULTS.md](RESULTS.md)
+
 ## Repo layout (minimal)
 ```text
 .gitignore  requirements.txt  config.yaml  README.md  RUN_PLAN.md  AGENTS.md
@@ -15,7 +18,8 @@ src/
   models.py      # teacher/student/early-exit + KD losses
   train.py       # 8GB-safe training
   calibrate.py   # threshold sweep + LTT (C4 deferred)
-  evaluate.py    # C2+C3 benchmark + Pareto
+  evaluate.py    # C2+C3 per-exit energy table, policies, per-head baseline, KILL-4
+  e2e_policy.py  # end-to-end measured policy energy vs table/FLOP predictions
   utils.py       # seeds, config, logging
   test_smoke.py  # CPU-only full check: python src/test_smoke.py
   test_units.py  # pytest suite incl. fake-NVML GPU paths: python -m pytest src/test_units.py -q
