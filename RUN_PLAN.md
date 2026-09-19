@@ -2,6 +2,10 @@
 
 > Do the steps in order. Each step gates the next (kill criteria at the end).
 > On THIS CPU-only machine only Step 0b applies. Everything else runs on the GPU box.
+>
+> **STATUS (RTX 3070):** Steps 0–4 DONE, see [RESULTS.md](RESULTS.md).
+> **Next: PHASE 2 (Steps 5–9, ~60 min total), further down this file.**
+> Research framing: [RESEARCH_STATEMENT.md](RESEARCH_STATEMENT.md).
 
 ## Step 0a. Setup (GPU box, once)
 ```bash
@@ -80,20 +84,89 @@ cat results/eval_cifar10_resnet14.json
 - **KILL-3: `significant_disagreements_3sigma` empty for every batch → drop FLOPs-are-wrong from abstract.**
 - **KILL-4: marginal-utility never beats confidence at matched acc → report negative C3 (still publishable).**
 
-## Step 5. Pervasive track (PerConAI fit; same pipeline, small nets)
-```bash
-python src/train.py --dataset kws --mode teacher --epochs 20
-python src/train.py --dataset kws --mode exit_kd --arch dscnn-s --teacher-ckpt results/kws_teacher_resnet18_e20_b64.pt --epochs 20
-python src/evaluate.py --ckpt results/kws_exit_kd_dscnn-s_e20_b64.pt --dataset kws --batches 1 8 16 32
-# har mirrors kws with --dataset har
-```
-- KWS/HAR use synthetic-shaped RANDOM windows until real loaders exist (outputs say `synthetic_data: true`):
-  energy/latency numbers are valid (shape-dependent only); accuracy/policy numbers are NOT.
-- One constrained device (Jetson/RPi) later = cross-device transfer experiment; until then, state the limitation.
+---
 
-## Step 6. What to copy back
-- `results/pilot.json`, `results/eval_*.json`, `results/ltt_*.json` (+ `*.pt` only if needed).
-- Never commit `data/`, `results/`, `*.csv`, `*.pt` (see `.gitignore`).
+# PHASE 2 — strengthen the workshop paper (run in this order, ~60 min)
+
+All commands are one line each: copy-paste them as-is into PowerShell.
+
+Before you start (3 min):
+```powershell
+git pull
+python src/test_smoke.py
+python -m pytest src/test_units.py -q
+nvidia-smi
+```
+- Expect smoke `11 pass, 0 fail` and pytest all passed.
+- Close browsers / Discord / game launchers. Keep the PC idle, plugged in, power mode "Best performance".
+- Every step writes to its OWN folder under `results/runs/`, so nothing overwrites anything.
+
+## Step 5. Policy re-analysis with a pooled, fair baseline (CIFAR, ~2 min, no energy run)
+Re-prices every policy with the run1+run2 **pooled** batch-1 cost table. Adds the **per-head
+threshold baseline** (the fair comparison for marginal-utility) and a **FLOP-cost sensitivity**
+(does MU only win because of the measured cost?).
+```powershell
+python src/evaluate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --skip-energy --cost-json results/runs/eval_run1/eval_cifar10_resnet14.json results/runs/eval_run2/eval_cifar10_resnet14.json --results results/runs/policy_pooled
+```
+Look at the `[KILL-4 measured]` / `[KILL-4 flops]` lines at the end:
+- `mu_vs_perhead` ≈ 0 wins → MU is just per-head thresholds (expected; report it).
+- `mu_vs_confidence` wins under **measured** but not under **flops** → the measured cost term changed
+  the decision (the C3 claim). Wins under both → the win comes from per-head flexibility, not measurement.
+
+## Step 6. End-to-end policy energy on CIFAR (THE new experiment, ~15 min)
+Runs the real early-exit runtime on 2500 real deploy images at every batch size, and compares
+the measured J/sample with the per-exit **table** prediction and the **FLOP** prediction.
+Compaction (drop exited samples) vs batch-wait vs just batching the full model.
+```powershell
+python src/e2e_policy.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --batches 1 8 16 32 64 --taus 0.9 0.97 0.99 --perhead-from results/runs/policy_pooled/eval_cifar10_resnet14.json --eval-json results/runs/eval_run1/eval_cifar10_resnet14.json results/runs/eval_run2/eval_cifar10_resnet14.json --results results/runs/e2e_cifar
+```
+- Console line per cell: `E=… mJ save=…% tableErr=…% flopErr=…%`.
+- `[e2e] WARNING runtime != offline` must NOT appear (the runtime must reproduce the offline policy).
+
+## Step 7. Pervasive track on REAL UCI-HAR (~25 min)
+The first command auto-downloads UCI-HAR (58 MB, SHA-256 pinned) into `data/`.
+```powershell
+python src/train.py --dataset har --mode teacher --arch resnet18 --epochs 20
+python src/train.py --dataset har --mode exit_kd --arch harcnn --teacher-ckpt results/har_teacher_resnet18_e20_b64.pt --epochs 20
+python src/train.py --dataset har --mode exit_ce --arch harcnn --epochs 20
+python src/calibrate.py --ckpt results/har_exit_kd_harcnn_e20_b64.pt --dataset har --alpha 0.05 --results results/runs/har_ltt_a005
+python src/calibrate.py --ckpt results/har_exit_kd_harcnn_e20_b64.pt --dataset har --alpha 0.03 --results results/runs/har_ltt_a003
+python src/evaluate.py --ckpt results/har_exit_kd_harcnn_e20_b64.pt --dataset har --batches 1 8 16 32 64 --results results/runs/har_eval
+python src/e2e_policy.py --ckpt results/har_exit_kd_harcnn_e20_b64.pt --dataset har --batches 1 8 16 32 64 --taus 0.9 0.97 0.99 --perhead-from results/runs/har_eval/eval_har_harcnn.json --eval-json results/runs/har_eval/eval_har_harcnn.json --results results/runs/e2e_har
+```
+- Expect: HAR final head ≈ 92–95 % (CPU check here: 93.0 %). `synthetic_data: false` everywhere.
+- HAR calibration n = 1473, so the smallest certifiable α ≈ 0.03 (Hoeffding). Don't bother with α ≤ 0.02.
+- The HAR model is 97 k params / 3.9 MFLOPs: FLOPs predict ~91 % saving at exit 0. The measured
+  number is the pervasive-scale C2 result.
+
+## Step 8. Is batch-1 noise DVFS? Clock-locked vs unlocked (CIFAR, ~20 min)
+First an unlocked run with 10 repeats (normal PowerShell):
+```powershell
+python src/evaluate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --batches 1 8 --repeats 10 --results results/runs/eval_b1b8_unlocked_r10
+```
+Then, in **PowerShell as Administrator**: lock the graphics clock, run the same thing, and UNLOCK:
+```powershell
+nvidia-smi -lgc 1500,1500
+python src/evaluate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --batches 1 8 --repeats 10 --results results/runs/eval_b1b8_locked1500
+nvidia-smi -rgc
+```
+- Compare `clock_stable`, `cv%` and `resolvable` between the two runs (printed per batch).
+  If exits 0↔1 become resolvable when locked → C1 finding: "batch-1 per-exit energy needs locked clocks".
+- If `nvidia-smi -lgc` is refused: skip the locked run, keep the unlocked r10 run, note the limitation.
+- **Always run `nvidia-smi -rgc` afterwards**, even if the run fails.
+
+## Step 9. Copy back
+Copy the whole `results/runs/` folder plus the new `results/har_*.json` to the analysis machine.
+Never commit `data/`, `results/`, `*.pt`.
+
+### Phase 2 decision table
+| Check | Where | Meaning |
+|---|---|---|
+| Runtime reproduces offline policy | Step 6/7: no `WARNING runtime != offline` | If it appears, stop: runtime numbers are invalid |
+| Table prediction error | `tableErr` in e2e output | Large error at any batch = additive per-exit tables mis-price policies (C3) |
+| Early exit vs full model at the same batch | `save=` at batch ≥16 | ≤ 0 = batching erases early-exit savings (Cluster F, measured) |
+| MU vs per-head baseline | `[KILL-4 …] mu_vs_perhead` | Expected ≈ tie: MU = per-head thresholds. Report as equivalence |
+| Locked clocks fix batch-1 resolvability | Step 8 | If not: batch-1 per-exit energy is intrinsically unresolvable on this GPU |
 
 ## 8GB cheat sheet
 - Train batch 64; eval sweep `--batches 1 8 16 32 64`; `--num-workers 0` on Windows.
@@ -112,3 +185,6 @@ python src/evaluate.py --ckpt results/kws_exit_kd_dscnn-s_e20_b64.pt --dataset k
 | `C2cModeInfoV` errors (old MoLab bug) | gone — we never call it; if Zeus reintroduces it, don't shim energy paths |
 | OOM exit 2 | `--batch-size 32`, close other procs, keep AMP on |
 | `selected: null` in LTT | expected at strict alpha; report honestly, try alpha 0.02/0.05 as sensitivity |
+| `UCI-HAR ... sha256 mismatch` | delete `data/uci_har.zip` and rerun; if it persists, the download is corrupted/tampered |
+| `UCI-HAR load/download failed` | no internet: get the zip from archive.ics.uci.edu (dataset 240) and save it as `data/uci_har.zip` |
+| `nvidia-smi -lgc` refused | needs Administrator PowerShell; if still refused, skip the Step 8 locked run (limitation) |
