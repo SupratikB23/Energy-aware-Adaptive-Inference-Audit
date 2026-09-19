@@ -184,8 +184,18 @@ def measure_energy_per_exit(meter, model, input_shape: tuple, device: torch.devi
         else:
             noise = math.sqrt(std[h] ** 2 + std[h + 1] ** 2)
             resolvable.append(bool(abs(mean[h + 1] - mean[h]) > 3.0 * noise))
+    clocks = [w["clock_mhz"] for w in windows if w["clock_mhz"] is not None and w["clock_mhz"] >= 0]
+    temps = [w["temp_c"] for w in windows if w["temp_c"] is not None and w["temp_c"] >= 0]
+    spread = (max(clocks) - min(clocks)) if clocks else None
     return {"mode": mode, "batch": batch, "mean_j": mean, "std_j": std,
+            "cv_pct": [100.0 * s / m if (s is not None and m) else None for s, m in zip(std, mean)],
             "iters": iters_used, "windows": windows,
+            "clock_mhz_min": min(clocks) if clocks else None,
+            "clock_mhz_max": max(clocks) if clocks else None,
+            "clock_spread_mhz": spread,
+            # DVFS moving under the measurement makes per-exit numbers non-stationary
+            "clock_stable": (spread is not None and spread <= 60),
+            "temp_c_range": [min(temps), max(temps)] if temps else None,
             "adjacent_resolvable_3sigma": resolvable, "skipped": False}
 
 
@@ -210,7 +220,20 @@ def divergence_report(flops: list, mean_j: list, std_j: list) -> dict:
                 if jo[i] - jo[j] > 3.0 * math.sqrt(si ** 2 + sj ** 2):
                     sig.append([i, j])
     fo_ord, jo_ord = np.argsort(fo, kind="stable"), np.argsort(jo, kind="stable")
+    # size of the saving: measured vs FLOP-predicted fraction of the full-model cost
+    frac_f, frac_j = fo / fo[-1], jo / jo[-1]
+    A = np.vstack([np.ones_like(fo), fo / 1e6]).T
+    coef = np.linalg.lstsq(A, jo, rcond=None)[0]
+    pred = A @ coef
+    ss = float(((jo - jo.mean()) ** 2).sum())
+    r2 = 1.0 - float(((jo - pred) ** 2).sum()) / ss if ss > 0 else None
     return {"available": True,
+            "frac_of_full_flops": [float(v) for v in frac_f],
+            "frac_of_full_joules": [float(v) for v in frac_j],
+            # + => FLOPs OVERstate the saving of exiting there; - => FLOPs understate it
+            "flop_saving_error_pts": [float(100.0 * (fj - ff)) for ff, fj in zip(frac_f, frac_j)],
+            "affine_fit": {"intercept_j": float(coef[0]), "j_per_mflop": float(coef[1]), "r2": r2,
+                           "intercept_share_of_full": float(coef[0] / jo[-1])},
             "flops_order": list(map(int, fo_ord)),
             "joule_order": list(map(int, jo_ord)),
             "orders_agree": bool((fo_ord == jo_ord).all()),
@@ -380,6 +403,135 @@ def lambda_grid(calib_stats: dict, gains: list[float], marg_norm: list[float],
     return sorted({round(float(v), 8) for v in list(base) + extra if v > 0})
 
 
+def _chosen_perhead(conf: np.ndarray, taus_h) -> np.ndarray:
+    """First head h < H-1 with conf[:, h] >= taus_h[h], else the final head (vectorized)."""
+    n, H = conf.shape
+    hit = conf[:, :H - 1] >= np.asarray(taus_h, dtype=float)[None, :]
+    first = np.where(hit.any(1), hit.argmax(1), H - 1)
+    return first.astype(np.int64)
+
+
+def policy_confidence_perhead(stats: dict, taus_h, costs=None) -> dict:
+    """Confidence exit with a SEPARATE threshold per head. The fair baseline for
+    marginal-utility, which reduces to exactly this rule: continue at h iff
+    conf < 1 - lambda * C[h] / G[h]."""
+    out = _summarize(_chosen_perhead(stats["conf"], taus_h), stats["correct"], costs)
+    out.update({"policy": "confidence-perhead", "taus_h": [float(t) for t in taus_h]})
+    return out
+
+
+def perhead_front(calib_stats: dict, deploy_stats: dict, grid: list[float], costs: list[float],
+                  max_points: int = 12) -> list[dict]:
+    """Tune per-head thresholds on CALIB only (full grid search), keep the calib
+    accuracy/cost Pareto front, report those settings on DEPLOY."""
+    import itertools
+    H = calib_stats["conf"].shape[1]
+    c = np.asarray(costs, dtype=float)
+    cand = []
+    for taus_h in itertools.product(sorted(set(grid)), repeat=H - 1):
+        ch = _chosen_perhead(calib_stats["conf"], taus_h)
+        n = len(ch)
+        cand.append((float(calib_stats["correct"][np.arange(n), ch].mean()), float(c[ch].mean()), taus_h))
+    cand.sort(key=lambda t: (t[1], -t[0]))
+    front, best_acc = [], -1.0
+    for acc, cost, taus_h in cand:  # ascending cost: keep strictly improving accuracy
+        if acc > best_acc + 1e-12:
+            front.append((acc, cost, taus_h))
+            best_acc = acc
+    if len(front) > max_points:
+        idx = np.unique(np.linspace(0, len(front) - 1, max_points).round().astype(int))
+        front = [front[i] for i in idx]
+    out = []
+    for acc_c, cost_c, taus_h in front:
+        r = policy_confidence_perhead(deploy_stats, taus_h, costs)
+        r.update({"calib_acc": acc_c, "calib_cost": cost_c})
+        out.append(r)
+    return out
+
+
+def matched_accuracy(points: list[dict], policy: str, ref: str) -> list[dict]:
+    """For each `policy` point: cheapest `ref` point with accuracy >= it (step
+    function, no interpolation). saving_pct > 0 => `policy` is cheaper."""
+    refs = [p for p in points if p["policy"] == ref and p.get("avg_cost") is not None]
+    rows = []
+    for p in points:
+        if p["policy"] != policy or p.get("avg_cost") is None:
+            continue
+        ok = [q["avg_cost"] for q in refs if q["acc"] >= p["acc"] - 1e-12]
+        if not ok:
+            rows.append({"acc": p["acc"], "cost": p["avg_cost"], "ref_cost": None, "saving_pct": None})
+            continue
+        rc = min(ok)
+        rows.append({"acc": p["acc"], "cost": p["avg_cost"], "ref_cost": rc,
+                     "saving_pct": 100.0 * (rc - p["avg_cost"]) / rc if rc else None})
+    return rows
+
+
+def _summ_matched(rows: list[dict]) -> dict:
+    s = [r["saving_pct"] for r in rows if r["saving_pct"] is not None]
+    return {"n": len(s), "wins": sum(v > 0 for v in s),
+            "median_saving_pct": float(np.median(s)) if s else None,
+            "min_saving_pct": float(min(s)) if s else None,
+            "max_saving_pct": float(max(s)) if s else None, "rows": rows}
+
+
+def run_policies(calib_stats: dict, deploy_stats: dict, base: list[float], taus: list[float],
+                 base_lams: list[float], cost_kind: str) -> dict:
+    """All policies on DEPLOY priced with one cost table; KILL-4 tables included."""
+    full = abs(base[-1]) if abs(base[-1]) > 0 else 1.0
+    gains = estimate_gains(calib_stats)
+    marg_raw = [base[h + 1] - base[h] for h in range(len(base) - 1)]
+    marg_norm = [max(1e-9, v / full) for v in marg_raw]
+    cnorm = [v / full for v in base]
+    lams = lambda_grid(calib_stats, gains, marg_norm, base_lams)
+    points: list[dict] = []
+    for t in taus:
+        points.append(policy_confidence(deploy_stats, t, base))
+    for eta in [0.3, 0.6, 1.0]:
+        points.append(policy_entropy(deploy_stats, eta, base))
+    for beta in [0.1, 0.3]:
+        for t in taus[::2]:
+            points.append(policy_eefp(deploy_stats, t, beta, cnorm, base))
+    for lam in lams:
+        r = policy_marginal_utility(deploy_stats, lam, gains, marg_norm, base)
+        r["gains"] = gains
+        points.append(r)
+    points.extend(perhead_front(calib_stats, deploy_stats, taus, base))
+    for p in points:
+        p["cost_kind"] = cost_kind
+        p["cost_frac_of_full"] = p["avg_cost"] / full if p.get("avg_cost") is not None else None
+    return {"cost_kind": cost_kind, "cost_table": base, "marginal_cost_norm": marg_norm,
+            "nonpositive_marginal_cost": [bool(v <= 0) for v in marg_raw],
+            "gains_calib": gains, "lambdas": lams,
+            "lambda_units": "expected accuracy gain per fraction of full-model cost",
+            "points": points, "pareto_idx": pareto_frontier(points),
+            "kill4": {
+                "mu_vs_confidence": _summ_matched(matched_accuracy(points, "marginal-utility", "confidence")),
+                "mu_vs_perhead": _summ_matched(matched_accuracy(points, "marginal-utility", "confidence-perhead")),
+                "perhead_vs_confidence": _summ_matched(matched_accuracy(points, "confidence-perhead", "confidence")),
+            }}
+
+
+def pooled_cost_table(paths: list[str], batch: int = 1, mode: str = "cascade") -> tuple[list[float], dict]:
+    """Mean per-exit J/sample at `batch`/`mode` pooled over several eval JSONs."""
+    import json
+    tabs, used = [], []
+    for p in paths:
+        d = json.loads(Path(p).read_text(encoding="utf-8"))
+        row = next((r for r in d.get("batch_rows", []) if r.get("batch") == batch and not r.get("oom")), None)
+        e = (row or {}).get(f"energy_{mode}")
+        if e and not e.get("skipped") and all(v is not None for v in e["mean_j"]):
+            tabs.append(e["mean_j"])
+            used.append(str(p))
+    if not tabs:
+        raise ValueError(f"no usable batch={batch} {mode} energy in {paths}")
+    arr = np.array(tabs, dtype=float)
+    return [float(v) for v in arr.mean(0)], {"files": used, "batch": batch, "mode": mode,
+                                             "per_file": arr.tolist(),
+                                             "between_file_cv_pct": (100 * arr.std(0) / arr.mean(0)).tolist()
+                                             if len(tabs) > 1 else None}
+
+
 # ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
@@ -404,6 +556,11 @@ def main() -> int:
                     help="GPU warmup before timed windows (default: config measure.warmup_seconds)")
     ap.add_argument("--idle-seconds", type=float, default=None,
                     help="idle baseline length (default: config measure.idle_seconds)")
+    ap.add_argument("--skip-energy", action="store_true",
+                    help="policies only: no idle/warmup/batch sweep (use with --cost-json)")
+    ap.add_argument("--cost-json", nargs="*", default=None,
+                    help="eval JSONs whose batch-1 cascade Joules are POOLED into the policy cost "
+                         "table (default: this run's own batch-1 cascade)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -460,7 +617,10 @@ def main() -> int:
     lat1 = measure_latency_per_exit(model, (1, ch, Hh, Ww), device, iters=args.lat_iters)
 
     # --- energy setup: settled idle baseline, then warmup to steady state ---
-    meter = EnergyMeter(poll_hz=float(mc.get("poll_hz", 150.0))) if device.type == "cuda" else None
+    meter = (EnergyMeter(poll_hz=float(mc.get("poll_hz", 150.0)))
+             if device.type == "cuda" and not args.skip_energy else None)
+    if args.skip_energy:
+        batches = []
     idle_info: dict = {"skipped": True, "reason": "no NVML/CUDA on this machine"}
     idle_p = None
     warm_info: dict = {"skipped": True}
@@ -511,40 +671,28 @@ def main() -> int:
         if meter is not None:
             meter.close()
 
-    # --- policies on deploy split; cost = batch-1 CASCADE (the deployed path) ---
+    # --- policies on deploy split ---
+    # Primary cost = batch-1 CASCADE Joules (the deployed per-sample path), pooled over
+    # --cost-json runs when given. Sensitivity = cascade FLOPs: if a policy only wins
+    # under measured Joules, the measured cost term is what changed the decision.
     calib_stats = collect_stats(model, calib_loader, device)
     deploy_stats = collect_stats(model, deploy_loader, device)
-    gains = estimate_gains(calib_stats)
     b1 = next((r for r in batch_rows if r.get("batch") == 1 and not r.get("oom")), None)
     e1 = b1.get("energy_cascade") if b1 else None
-    has_joules = bool(e1 and not e1.get("skipped") and all(v is not None for v in e1["mean_j"]))
-    if has_joules:
+    cost_source: dict = {"files": []}
+    if args.cost_json:
+        base, cost_source = pooled_cost_table(args.cost_json, batch=1, mode="cascade")
+        cost_kind = f"measured-joules-per-sample (batch 1, cascade, pooled over {len(cost_source['files'])} runs)"
+    elif e1 and not e1.get("skipped") and all(v is not None for v in e1["mean_j"]):
         base = [float(v) for v in e1["mean_j"]]
         cost_kind = "measured-joules-per-sample (batch 1, cascade, idle-subtracted)"
     else:
         base = [float(v) for v in flops_cascade]
         cost_kind = "flops-cascade (energy unavailable on this machine or batch 1 not swept)"
-    full = abs(base[-1]) if abs(base[-1]) > 0 else 1.0
-    marg_raw = [base[h + 1] - base[h] for h in range(len(base) - 1)]
-    marg_norm = [max(1e-9, v / full) for v in marg_raw]
-    cnorm = [v / full for v in base]
-    lams = lambda_grid(calib_stats, gains, marg_norm, base_lams)
-
-    points: list[dict] = []
-    for t in taus:
-        points.append(policy_confidence(deploy_stats, t, base))
-    for eta in [0.3, 0.6, 1.0]:
-        points.append(policy_entropy(deploy_stats, eta, base))
-    for beta in [0.1, 0.3]:
-        for t in taus[::2]:
-            points.append(policy_eefp(deploy_stats, t, beta, cnorm, base))
-    for lam in lams:
-        r = policy_marginal_utility(deploy_stats, lam, gains, marg_norm, base)
-        r["gains"] = gains
-        points.append(r)
-    for p in points:
-        p["cost_kind"] = cost_kind
-    front = pareto_frontier(points)
+    primary = run_policies(calib_stats, deploy_stats, base, taus, base_lams, cost_kind)
+    flops_view = run_policies(calib_stats, deploy_stats, [float(v) for v in flops_cascade],
+                              taus, base_lams, "flops-cascade (sensitivity)")
+    del flops_view["points"]  # keep JSON small; the KILL-4 tables are what matter
 
     out = {
         "dataset": dataset, "arch": arch, "device": str(device), "ckpt": args.ckpt,
@@ -555,31 +703,49 @@ def main() -> int:
                       "matmul_allow_tf32": bool(torch.backends.cuda.matmul.allow_tf32),
                       "cudnn_benchmark": bool(torch.backends.cudnn.benchmark)},
         "protocol": {"energy_iters_min": energy_iters, "repeats": repeats,
-                     "min_window_s": min_window_s, "warmup": warm_info, "idle_seconds": idle_s},
+                     "min_window_s": min_window_s, "warmup": warm_info, "idle_seconds": idle_s,
+                     "skip_energy": bool(args.skip_energy)},
         "num_heads": int(getattr(model, "num_heads", 1)),
         "flops_per_exit": flops, "flops_per_exit_cascade": flops_cascade,
         "lat_per_exit_s_b1": lat1, "idle_info": idle_info,
         "joules_per_exit_marginal": e1["mean_j"] if e1 else None,
-        "cost_kind": cost_kind, "cost_table": base, "marginal_cost_norm": marg_norm,
-        "nonpositive_marginal_cost": [bool(v <= 0) for v in marg_raw],
-        "gains_calib": gains, "lambdas": lams,
-        "lambda_units": "expected accuracy gain per fraction of full-model cost",
-        "batch_rows": batch_rows, "points": points, "pareto_idx": front,
+        "cost_source": cost_source,
+        **{k: primary[k] for k in ("cost_kind", "cost_table", "marginal_cost_norm",
+                                   "nonpositive_marginal_cost", "gains_calib", "lambdas",
+                                   "lambda_units", "points", "pareto_idx", "kill4")},
+        "flops_sensitivity": flops_view,
+        "batch_rows": batch_rows,
         "divergence": (b1 or {}).get("divergence_prefix", {"available": False}),
+        "calib_full_acc": float(calib_stats["correct"][:, -1].mean()),
+        "deploy_full_acc": float(deploy_stats["correct"][:, -1].mean()),
+        "deploy_head_acc": [float(v) for v in deploy_stats["correct"].mean(0)],
     }
     save_json(out, results / f"eval_{dataset}_{arch}.json")
     print(f"[evaluate] heads={out['num_heads']} flops={flops} cascade_flops={flops_cascade}", flush=True)
     print(f"[evaluate] cost={base} ({cost_kind})", flush=True)
-    print(f"[evaluate] pareto={front} divergence(b1,prefix)={out['divergence']}", flush=True)
-    for p in points:
+    for r in batch_rows:
+        dv = r.get("divergence_prefix", {})
+        if dv.get("available"):
+            ep = r["energy_prefix"]
+            print(f"[evaluate] b={r['batch']:<3d} FLOP-saving error pts={[round(v, 1) for v in dv['flop_saving_error_pts']]} "
+                  f"R2={dv['affine_fit']['r2']:.3f} clock {ep['clock_mhz_min']}-{ep['clock_mhz_max']} MHz "
+                  f"stable={ep['clock_stable']} cv%={[round(v, 1) for v in ep['cv_pct']]}", flush=True)
+    for p in primary["points"]:
         if "tau" in p:
             extra = f"tau={p['tau']}"
         elif "lambda" in p:
             extra = f"lambda={p['lambda']:.4g}"
+        elif "taus_h" in p:
+            extra = "taus=" + ",".join(f"{t:g}" for t in p["taus_h"])
         else:
             extra = f"eta={p.get('eta')}"
-        print(f"  {p['policy']:16s} {extra:16s} acc={p['acc']:.4f} "
-              f"exit_rate={p['exit_rate']:.3f} avg_cost={p['avg_cost']:.6g}", flush=True)
+        print(f"  {p['policy']:18s} {extra:22s} acc={p['acc']:.4f} exit_rate={p['exit_rate']:.3f} "
+              f"cost={100 * p['cost_frac_of_full']:.1f}% of full", flush=True)
+    for view, k4 in (("measured", primary["kill4"]), ("flops", flops_view["kill4"])):
+        for name, v in k4.items():
+            print(f"[KILL-4 {view:8s}] {name:22s} wins {v['wins']}/{v['n']} median saving "
+                  f"{v['median_saving_pct'] if v['median_saving_pct'] is None else round(v['median_saving_pct'], 1)}%",
+                  flush=True)
     return 0
 
 
