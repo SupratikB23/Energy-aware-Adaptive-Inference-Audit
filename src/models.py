@@ -125,6 +125,14 @@ class EarlyExitResNet(nn.Module):
         yield self.exit3(h)
         yield self.final(self.stage4(h))
 
+    def exit_blocks(self) -> list[tuple]:
+        """[(block, head), ...]: block k maps the previous feature map to the
+        input of head k. Lets a runtime drop exited samples between blocks
+        (per-sample early exit inside a batch = compaction / rebatching)."""
+        return [(lambda x: self.stage1(self._stem(x)), self.exit1),
+                (self.stage2, self.exit2), (self.stage3, self.exit3),
+                (self.stage4, self.final)]
+
     def forward_all(self, x: torch.Tensor) -> list[torch.Tensor]:
         h = self._stem(x)
         h1 = self.stage1(h)
@@ -182,6 +190,12 @@ class SmallExitCNN(nn.Module):
         h = F.relu(self.bn2(self.conv2(h)))
         yield self.exit2(h)
         yield self.final(F.relu(self.bn3(self.conv3(h))))
+
+    def exit_blocks(self) -> list[tuple]:
+        """[(block, head), ...] (see EarlyExitResNet.exit_blocks)."""
+        return [(lambda x: F.relu(self.bn1(self.conv1(x))), self.exit1),
+                (lambda h: F.relu(self.bn2(self.conv2(h))), self.exit2),
+                (lambda h: F.relu(self.bn3(self.conv3(h))), self.final)]
 
     def forward_all(self, x: torch.Tensor) -> list[torch.Tensor]:
         h1 = F.relu(self.bn1(self.conv1(x)))
@@ -260,7 +274,7 @@ def default_io(dataset: str) -> tuple[int, int, tuple[int, int]]:
     if d == "kws":
         return 12, 1, (49, 40)   # SpeechCommands mel window placeholder
     if d == "har":
-        return 6, 9, (32, 32)    # UCI-HAR window placeholder (9ch x time)
+        return 6, 9, (1, 128)    # UCI-HAR: 9 inertial channels x 128 samples (2.56 s @ 50 Hz)
     raise ValueError(f"unknown dataset {dataset!r} (cifar10|kws|har)")
 
 
