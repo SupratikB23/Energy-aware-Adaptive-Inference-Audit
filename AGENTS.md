@@ -25,7 +25,7 @@
 - Handle OOM gracefully with a clear message; never silently shrink the experiment.
 
 ## 5. Minimal repo
-- One code folder: `src/`. Two gitignored folders: `data/`, `results/`. Root: `.gitignore`, `requirements.txt`, `config.yaml`, `README.md`, `RUN_PLAN.md`, `AGENTS.md`.
+- One code folder: `src/`. Two gitignored folders: `data/`, `results/`. Root: `.gitignore`, `requirements.txt`, `config.yaml`, `README.md`, `RUN_PLAN.md`, `AGENTS.md`, `RESULTS.md`, `RESEARCH_STATEMENT.md`.
 - Do not create new top-level folders without asking. Do not commit `data/`, `results/`, `*.pt`, `*.csv`.
 - Keep diffs small and file-scoped. Fix the file asked for; don't refactor the world.
 
