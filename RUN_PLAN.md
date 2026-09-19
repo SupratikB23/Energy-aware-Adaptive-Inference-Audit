@@ -52,6 +52,19 @@ cat results/ltt_cifar10_resnet14.json
 - Expect: `selected` tau (most aggressive certified) + `deploy_check` on held-out split.
 - Risk = P(policy wrong AND full right) (bounded {0,1} loss → Hoeffding valid).
 - `selected: null` = nothing certifiable at this alpha — loosen alpha or accept negative result.
+- **alpha=0.01 is uncertifiable at n=5000 by construction**: Hoeffding needs
+  emp_risk <= alpha - sqrt(ln(1/delta)/(2n)) = 0.01 - 0.0152 < 0. Minimum certifiable alpha ~0.016.
+  Report this in the paper; then run the alpha sensitivity sweep (copy after each run, same output file):
+```powershell
+python src/calibrate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --alpha 0.05
+Copy-Item results/ltt_cifar10_resnet14.json results/ltt_cifar10_resnet14_a005.json
+python src/calibrate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --alpha 0.03
+Copy-Item results/ltt_cifar10_resnet14.json results/ltt_cifar10_resnet14_a003.json
+python src/calibrate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --alpha 0.02
+Copy-Item results/ltt_cifar10_resnet14.json results/ltt_cifar10_resnet14_a002.json
+```
+- Expect: alpha 0.05 certifies tau ~0.85-0.9+; alpha 0.02 needs emp_risk <= ~0.5% (very high tau or null).
+  Thresholds grid (config `eval.thresholds`) goes up to 0.999 because head 0 is overconfident.
 
 ## Step 4. Benchmark C2+C3 (the audit; use >=1000 energy iters)
 ```bash
