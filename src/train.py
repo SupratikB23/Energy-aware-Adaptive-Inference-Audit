@@ -43,6 +43,94 @@ def is_synthetic(loader: DataLoader) -> bool:
     return isinstance(loader.dataset, TensorDataset)
 
 
+HAR_URL = "https://archive.ics.uci.edu/static/public/240/human+activity+recognition+using+smartphones.zip"
+HAR_SHA256 = "c00b803081a5c797cd5e4b83700a9810b38d53d9d84e01917e090e1fdbc81031"
+HAR_CHANNELS = ["body_acc_x", "body_acc_y", "body_acc_z", "body_gyro_x", "body_gyro_y",
+                "body_gyro_z", "total_acc_x", "total_acc_y", "total_acc_z"]
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_uci_har(data_root: str, download: bool = True):
+    """Real UCI-HAR raw inertial windows -> (Xtr, ytr, Xte, yte) tensors.
+
+    X: float32 [N, 9, 1, 128] (9 channels x 2.56 s @ 50 Hz), z-scored per channel
+    with TRAIN statistics. y: int64 in [0, 6). Official subject-disjoint split.
+    Security: the archive is SHA-256 pinned; members are read by exact name and
+    parsed as text with numpy (no pickle, nothing extracted to disk). Parsed
+    arrays are cached as .npz and re-loaded with allow_pickle=False.
+    """
+    import io
+    import urllib.request
+    import zipfile
+
+    import numpy as np
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    cache = root / "uci_har_inertial.npz"
+    if cache.exists():
+        d = np.load(cache, allow_pickle=False)
+        arrs = [d["Xtr"], d["ytr"], d["Xte"], d["yte"]]
+    else:
+        zpath = root / "uci_har.zip"
+        if not zpath.exists():
+            if not download:
+                raise FileNotFoundError(f"{zpath} missing")
+            print(f"[data] downloading UCI-HAR (~58 MB) -> {zpath}", flush=True)
+            tmp = zpath.with_suffix(".part")
+            with urllib.request.urlopen(HAR_URL, timeout=120) as r, open(tmp, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            tmp.replace(zpath)
+        got = _sha256(zpath)
+        if got != HAR_SHA256:
+            raise RuntimeError(f"UCI-HAR archive sha256 mismatch ({got}); refusing to use it. "
+                               f"Delete {zpath} and retry.")
+        inner = zipfile.ZipFile(zpath).read("UCI HAR Dataset.zip")
+        zi = zipfile.ZipFile(io.BytesIO(inner))
+
+        def split(name: str):
+            x = np.stack([np.loadtxt(io.BytesIO(zi.read(
+                f"UCI HAR Dataset/{name}/Inertial Signals/{c}_{name}.txt")), dtype=np.float32)
+                for c in HAR_CHANNELS], axis=1)                       # [N, 9, 128]
+            y = np.loadtxt(io.BytesIO(zi.read(f"UCI HAR Dataset/{name}/y_{name}.txt"))).astype(np.int64) - 1
+            return x, y
+        Xtr, ytr = split("train")
+        Xte, yte = split("test")
+        np.savez(cache, Xtr=Xtr, ytr=ytr, Xte=Xte, yte=yte)
+        arrs = [Xtr, ytr, Xte, yte]
+    Xtr, ytr, Xte, yte = arrs
+    mu = Xtr.mean(axis=(0, 2), keepdims=True)
+    sd = Xtr.std(axis=(0, 2), keepdims=True) + 1e-6
+    Xtr = (Xtr - mu) / sd
+    Xte = (Xte - mu) / sd
+    t = lambda a: torch.from_numpy(np.ascontiguousarray(a))  # noqa: E731
+    return (t(Xtr).float().unsqueeze(2), t(ytr).long(), t(Xte).float().unsqueeze(2), t(yte).long())
+
+
+class _RealTensorDataset(torch.utils.data.Dataset):
+    """TensorDataset twin that is NOT flagged as synthetic by is_synthetic()."""
+
+    def __init__(self, x: torch.Tensor, y: torch.Tensor):
+        self.x, self.y = x, y
+
+    def __len__(self) -> int:
+        return int(self.y.shape[0])
+
+    def __getitem__(self, i):
+        return self.x[i], self.y[i]
+
+
 def get_dataloaders(dataset: str, data_root: str, batch_size: int, num_workers: int,
                     seed: int, force_synthetic: bool = False):
     """Returns (train_loader, test_loader, num_classes, in_channels)."""
@@ -73,7 +161,17 @@ def get_dataloaders(dataset: str, data_root: str, batch_size: int, num_workers: 
             raise RuntimeError(
                 f"CIFAR10 load/download failed ({e!r}). Stage it under {data_root!r} "
                 f"or pass --synthetic for a plumbing-only run.") from e
-    # Synthetic fallback (also used for kws/har until real features are staged)
+    if ds == "har" and not force_synthetic:
+        try:
+            Xtr, ytr, Xte, yte = load_uci_har(data_root)
+        except Exception as e:
+            raise RuntimeError(f"UCI-HAR load/download failed ({e!r}). Put the official zip at "
+                               f"{data_root}/uci_har.zip or pass --synthetic.") from e
+        nc, ch, _ = default_io("har")
+        tl = DataLoader(_RealTensorDataset(Xtr, ytr), batch_size=batch_size, shuffle=True)
+        el = DataLoader(_RealTensorDataset(Xte, yte), batch_size=batch_size, shuffle=False)
+        return tl, el, nc, ch
+    # Synthetic fallback (kws until real features are staged; any dataset with --synthetic)
     nc, ch, (H, W) = default_io(ds if ds in ("kws", "har") else "cifar10")
     ntr, nte = 2048, 512
     Xtr = torch.randn(ntr, ch, H, W, generator=g)

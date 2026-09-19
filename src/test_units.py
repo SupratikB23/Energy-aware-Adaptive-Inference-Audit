@@ -643,3 +643,206 @@ def test_cli_train_exit_kd_without_teacher_fails_cleanly(tmp_path):
     r = _run(["src/train.py", "--dataset", "kws", "--mode", "exit_kd", "--epochs", "1",
               "--device", "cpu", "--synthetic"], tmp_path)
     assert r.returncode == 2 and "--teacher-ckpt is required" in r.stdout
+
+
+# ----------------------------------------------------------------------------
+# v2: per-head baseline, matched accuracy, pooled costs, e2e runtime, UCI-HAR
+# ----------------------------------------------------------------------------
+import e2e_policy  # noqa: E402
+
+
+def test_perhead_with_equal_taus_equals_global_confidence():
+    st = _fake_stats()
+    for t in (0.3, 0.6, 0.9, 1.01):
+        a = evaluate.policy_confidence(st, t, [1, 2, 3, 4])
+        b = evaluate.policy_confidence_perhead(st, [t, t, t], [1, 2, 3, 4])
+        assert (a["acc"], a["avg_exit"], a["avg_cost"]) == (b["acc"], b["avg_exit"], b["avg_cost"])
+
+
+def test_marginal_utility_is_exactly_perhead_confidence():
+    """Continue at h iff (1-conf)*G/C > lam  <=>  exit iff conf >= 1 - lam*C/G."""
+    st = _fake_stats(n=3000)
+    gains = [0.10, 0.05, 0.02]
+    marg = [0.2, 0.3, 0.5]
+    for lam in (0.01, 0.05, 0.1, 0.2):
+        mu = evaluate.policy_marginal_utility(st, lam, gains, marg, [1, 2, 3, 4])
+        taus = [1 - lam * c / g for c, g in zip(marg, gains)]
+        ph = evaluate.policy_confidence_perhead(st, taus, [1, 2, 3, 4])
+        assert mu["avg_exit"] == pytest.approx(ph["avg_exit"], abs=2e-3)
+        assert mu["acc"] == pytest.approx(ph["acc"], abs=2e-3)
+
+
+def test_perhead_front_is_calib_tuned_and_monotone():
+    cal, dep = _fake_stats(seed=1), _fake_stats(seed=2)
+    pts = evaluate.perhead_front(cal, dep, [0.5, 0.7, 0.9, 0.99], [1.0, 2.0, 3.0, 4.0], max_points=6)
+    assert 1 <= len(pts) <= 6
+    cc = [p["calib_cost"] for p in pts]
+    ca = [p["calib_acc"] for p in pts]
+    assert cc == sorted(cc) and ca == sorted(ca)
+    assert all(p["policy"] == "confidence-perhead" and len(p["taus_h"]) == 3 for p in pts)
+
+
+def test_matched_accuracy_step_rule():
+    pts = [{"policy": "confidence", "acc": 0.90, "avg_cost": 10.0},
+           {"policy": "confidence", "acc": 0.95, "avg_cost": 20.0},
+           {"policy": "marginal-utility", "acc": 0.91, "avg_cost": 15.0},
+           {"policy": "marginal-utility", "acc": 0.89, "avg_cost": 12.0},
+           {"policy": "marginal-utility", "acc": 0.99, "avg_cost": 1.0}]
+    rows = evaluate.matched_accuracy(pts, "marginal-utility", "confidence")
+    assert rows[0]["ref_cost"] == 20.0 and rows[0]["saving_pct"] == pytest.approx(25.0)
+    assert rows[1]["ref_cost"] == 10.0 and rows[1]["saving_pct"] == pytest.approx(-20.0)
+    assert rows[2]["ref_cost"] is None  # no reference is that accurate: not counted
+
+
+def test_run_policies_reports_kill4_under_both_cost_views():
+    cal, dep = _fake_stats(seed=1), _fake_stats(seed=2)
+    r = evaluate.run_policies(cal, dep, [0.02, 0.026, 0.032, 0.038], [0.6, 0.8, 0.9, 0.99],
+                              [0.01], "measured")
+    assert set(r["kill4"]) == {"mu_vs_confidence", "mu_vs_perhead", "perhead_vs_confidence"}
+    assert any(p["policy"] == "confidence-perhead" for p in r["points"])
+    assert all(0 <= p["cost_frac_of_full"] <= 1.0 + 1e-9 for p in r["points"])
+
+
+def test_pooled_cost_table(tmp_path):
+    def mk(name, vals):
+        d = {"batch_rows": [{"batch": 1, "energy_cascade": {"mean_j": vals, "skipped": False}},
+                            {"batch": 8, "energy_cascade": {"mean_j": [9, 9, 9, 9], "skipped": False}}]}
+        (tmp_path / name).write_text(json.dumps(d))
+        return str(tmp_path / name)
+    base, info = evaluate.pooled_cost_table([mk("a.json", [1, 2, 3, 4]), mk("b.json", [3, 4, 5, 6])])
+    assert base == [2.0, 3.0, 4.0, 5.0] and len(info["files"]) == 2
+    with pytest.raises(ValueError):
+        evaluate.pooled_cost_table([str(tmp_path / "a.json")], batch=64)
+
+
+def test_divergence_reports_saving_error_sign():
+    dv = evaluate.divergence_report([1, 2, 3, 4], [3.0, 3.5, 3.8, 4.0], [0.01] * 4)
+    # FLOPs say exit0 = 25% of full, measured says 75% -> FLOPs overstate the saving
+    assert dv["flop_saving_error_pts"][0] == pytest.approx(50.0)
+    assert dv["affine_fit"]["r2"] is not None and dv["flop_saving_error_pts"][-1] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("ds,arch,shape", [("cifar10", "resnet14", (3, 32, 32)),
+                                           ("har", "harcnn", (9, 1, 128))])
+def test_exit_blocks_chain_equals_forward_all(ds, arch, shape):
+    torch.manual_seed(0)
+    nc, ch, _ = models.default_io(ds)
+    m = models.build_model(ds, arch, nc, ch).eval()
+    x = torch.randn(3, *shape)
+    with torch.no_grad():
+        h, outs = x, []
+        for blk, head in m.exit_blocks():
+            h = blk(h)
+            outs.append(head(h))
+        for a, b in zip(outs, m.forward_all(x)):
+            assert torch.allclose(a, b, atol=1e-5)
+
+
+@pytest.mark.parametrize("mode", ["compact", "batchwait"])
+@pytest.mark.parametrize("batch", [1, 5, 16])
+def test_e2e_runtime_matches_offline_policy(mode, batch):
+    """The timed runtime must make exactly the offline policy's predictions."""
+    torch.manual_seed(0)
+    m = models.build_model("har", "harcnn", 6, 9).eval()
+    X = torch.randn(40, 9, 1, 128) * 3
+    with torch.no_grad():
+        heads = [F.softmax(h, 1) for h in m.forward_all(X)]
+    conf = torch.stack([h.max(1).values for h in heads], 1).numpy()
+    preds = torch.stack([h.argmax(1) for h in heads], 1)
+    for taus in ([0.3, 0.3], [0.5, 0.4], [0.99, 0.2], [1.1, 1.1]):
+        ch = evaluate._chosen_perhead(conf, taus)
+        want = preds[torch.arange(40), torch.from_numpy(ch)]
+        got = torch.cat([e2e_policy.run_policy_batch(m, X[s:s + batch], taus, mode)
+                         for s in range(0, 40, batch)])
+        assert torch.equal(got, want), (taus, mode, batch)
+    full = e2e_policy.run_policy_batch(m, X, None, "compact")
+    assert torch.equal(full, preds[:, -1])
+
+
+def test_e2e_prediction_helpers():
+    assert e2e_policy.exit_fractions(np.array([0, 0, 1, 2]), 3) == [0.5, 0.25, 0.25]
+    assert e2e_policy.summarize_prediction(10.0, 12.0) == pytest.approx(20.0)
+    assert e2e_policy.summarize_prediction(None, 1.0) is None
+
+
+def _fake_har_zip(path, n_tr=6, n_te=4):
+    """Outer zip containing 'UCI HAR Dataset.zip' with the real member layout."""
+    import io as _io
+    import zipfile
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zi:
+        for split, n in (("train", n_tr), ("test", n_te)):
+            for c in train.HAR_CHANNELS:
+                rows = "\n".join(" ".join(f"{(i + j) * 0.01:.4f}" for j in range(128)) for i in range(n))
+                zi.writestr(f"UCI HAR Dataset/{split}/Inertial Signals/{c}_{split}.txt", rows)
+            zi.writestr(f"UCI HAR Dataset/{split}/y_{split}.txt", "\n".join(str(1 + i % 6) for i in range(n)))
+    with zipfile.ZipFile(path, "w") as zo:
+        zo.writestr("UCI HAR Dataset.zip", buf.getvalue())
+
+
+def test_har_loader_parses_real_layout(tmp_path, monkeypatch):
+    _fake_har_zip(tmp_path / "uci_har.zip")
+    monkeypatch.setattr(train, "HAR_SHA256", train._sha256(tmp_path / "uci_har.zip"))
+    Xtr, ytr, Xte, yte = train.load_uci_har(str(tmp_path), download=False)
+    assert Xtr.shape == (6, 9, 1, 128) and Xte.shape == (4, 9, 1, 128)
+    assert ytr.min() >= 0 and ytr.max() <= 5 and ytr.dtype == torch.long
+    assert (tmp_path / "uci_har_inertial.npz").exists()
+    Xtr2, *_ = train.load_uci_har(str(tmp_path), download=False)  # from npz cache
+    assert torch.allclose(Xtr, Xtr2)
+
+
+def test_pen_har_tampered_archive_is_refused(tmp_path):
+    """Security: an archive whose SHA-256 differs from the pinned one is never parsed."""
+    _fake_har_zip(tmp_path / "uci_har.zip")
+    with pytest.raises(RuntimeError, match="sha256 mismatch"):
+        train.load_uci_har(str(tmp_path), download=False)
+    assert not (tmp_path / "uci_har_inertial.npz").exists()
+
+
+def test_har_real_dataset_not_flagged_synthetic(tmp_path, monkeypatch):
+    _fake_har_zip(tmp_path / "uci_har.zip", n_tr=12, n_te=8)
+    monkeypatch.setattr(train, "HAR_SHA256", train._sha256(tmp_path / "uci_har.zip"))
+    tl, el, nc, ch = train.get_dataloaders("har", str(tmp_path), 4, 0, 0)
+    assert not train.is_synthetic(tl) and (nc, ch) == (6, 9)
+    x, y = next(iter(tl))
+    assert x.shape == (4, 9, 1, 128)
+
+
+def test_cli_evaluate_skip_energy_with_cost_json(tmp_path):
+    d = {"batch_rows": [{"batch": 1, "energy_cascade": {"mean_j": [0.01, 0.02, 0.03], "skipped": False}}]}
+    cj = tmp_path / "cost.json"
+    cj.write_text(json.dumps(d))
+    tl = tmp_path / "r"
+    r = _run(["src/evaluate.py", "--dataset", "kws", "--arch", "dscnn-s", "--synthetic",
+              "--skip-energy", "--cost-json", str(cj), "--lat-iters", "4"], tl)
+    assert r.returncode == 0, r.stdout + r.stderr
+    ev = json.loads((tl / "eval_kws_dscnn-s.json").read_text())
+    assert ev["cost_table"] == [0.01, 0.02, 0.03] and "pooled over 1" in ev["cost_kind"]
+    assert ev["batch_rows"] == [] and "kill4" in ev and "kill4" in ev["flops_sensitivity"]
+
+
+def test_cli_e2e_policy_cpu(tmp_path):
+    ck = tmp_path / "k.pt"
+    _save_ckpt(ck, "kws", "dscnn-s")
+    r = _run(["src/e2e_policy.py", "--ckpt", str(ck), "--dataset", "kws", "--synthetic",
+              "--device", "cpu", "--batches", "1", "8", "--taus", "0.2", "--perhead", "0.3,0.2",
+              "--repeats", "1", "--min-window-s", "0.05", "--max-samples", "64"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = json.loads((tmp_path / "e2e_kws_dscnn-s.json").read_text())
+    assert d["synthetic_data"] is True
+    assert all(row["j_per_sample"] is None for row in d["rows"])  # CPU: never fake Joules
+    assert {(row["batch"], row["mode"]) for row in d["rows"]} >= {(1, "compact"), (8, "compact"), (8, "batchwait")}
+    for p in d["policies"]:
+        for acc in p["runtime_acc"].values():
+            assert acc == pytest.approx(p["acc_energy_subset"], abs=1e-6)
+
+
+def test_e2e_perhead_from_eval(tmp_path):
+    d = {"deploy_full_acc": 0.92, "points": [
+        {"policy": "confidence-perhead", "acc": 0.919, "avg_cost": 5.0, "taus_h": [0.99, 0.9, 0.8]},
+        {"policy": "confidence-perhead", "acc": 0.915, "avg_cost": 3.0, "taus_h": [0.95, 0.9, 0.8]},
+        {"policy": "confidence-perhead", "acc": 0.80, "avg_cost": 1.0, "taus_h": [0.5, 0.5, 0.5]},
+        {"policy": "confidence", "acc": 0.99, "avg_cost": 0.1, "tau": 0.5}]}
+    p = tmp_path / "e.json"
+    p.write_text(json.dumps(d))
+    assert e2e_policy.perhead_from_eval(str(p)) == [[0.99, 0.9, 0.8], [0.95, 0.9, 0.8]]
