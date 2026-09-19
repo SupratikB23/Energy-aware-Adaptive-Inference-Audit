@@ -27,5 +27,5 @@ venv/
 Thumbs.db
 .DS_Store
 # ---- keep source + configs tracked ----
-# NOTE: the three original research files in repo root are tracked intentionally.
+# NOTE: the two original research files in repo root are tracked intentionally.
 # Do NOT add data/ or results/ files.

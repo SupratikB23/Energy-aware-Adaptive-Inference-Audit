@@ -5,9 +5,8 @@
 - Do not amend commits. Stage nothing unless the user explicitly says `commit`.
 - Remote = read-only. Local edits are fine; pushing is forbidden.
 
-## 1. Do not touch the three source documents
+## 1. Do not touch the two source documents
 - `percom2027_literature_matrix_and_verdict.md` and `notebook.py` are frozen inputs. Never edit them.
-- `ChatGPT-Explain LTT Threshold Selection-20260914-1326.md` is optional personal notes; code and tests must not depend on it.
 
 ## 2. Novelty honesty (from literature verdict)
 - The rule `continue iff E[acc gain]/marginal cost > lambda` is rational metareasoning / value-of-computation (Russell & Wefald, 1990s). NEVER present it as a new controller.

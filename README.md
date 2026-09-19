@@ -3,10 +3,8 @@
 Measured-energy audit of early-exit policies (C1 protocol + C2 regime map + C3 honest benchmark).
 See `RUN_PLAN.md` for the exact GPU-box run order. See `AGENTS.md` for AI rules.
 
-## Frozen inputs (do not edit)
-- `percom2027_literature_matrix_and_verdict.md` — controlling verdict (C1-C4, kill criteria).
-- (optional, not required by any code/test) `ChatGPT-Explain LTT Threshold Selection-20260914-1326.md` — personal LTT notes.
-- `notebook.py` — collaborator Marimo/MoLab prototype (NVML lessons folded into `src/measure.py`).
+Research statement and controlling verdicts (C1-C4, kill criteria):
+[percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md)
 
 ## Repo layout (minimal)
 ```text
