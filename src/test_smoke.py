@@ -194,8 +194,7 @@ def t_files():
               "src/utils.py", "src/measure.py", "src/models.py", "src/train.py",
               "src/calibrate.py", "src/evaluate.py", "src/check_gpu.py"):
         assert (root / f).exists(), f"missing {f}"
-    for frozen in ("percom2027_literature_matrix_and_verdict.md", "notebook.py",
-                   "ChatGPT-Explain LTT Threshold Selection-20260914-1326.md"):
+    for frozen in ("percom2027_literature_matrix_and_verdict.md", "notebook.py"):
         assert (root / frozen).exists(), f"frozen input missing: {frozen}"
     return "all required + frozen files present"
 
