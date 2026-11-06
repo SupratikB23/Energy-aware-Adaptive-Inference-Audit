@@ -35,7 +35,7 @@ import torch.nn.functional as F
 
 try:
     from utils import (cuda_sync, ensure_dir, get_git_hash, load_config, mean_ci95,
-                       resolve_device, resolve_session, result_stem, save_json, set_seed,
+                       resolve_device, resolve_session, refuse_silent_cpu, result_stem, save_json, set_seed,
                        torch_info, vram_info)
     from models import checkpoint_metadata, default_io, flops_per_exit, model_from_checkpoint
     from measure import EnergyMeter, clock_check, co_tenancy_snapshot
@@ -43,7 +43,7 @@ try:
     from evaluate import _chosen_perhead, collect_stats, gpu_warmup
 except ImportError:  # pragma: no cover
     from src.utils import (cuda_sync, ensure_dir, get_git_hash, load_config, mean_ci95,
-                           resolve_device, resolve_session, result_stem, save_json, set_seed,
+                           resolve_device, resolve_session, refuse_silent_cpu, result_stem, save_json, set_seed,
                            torch_info, vram_info)
     from src.models import checkpoint_metadata, default_io, flops_per_exit, model_from_checkpoint
     from src.measure import EnergyMeter, clock_check, co_tenancy_snapshot
@@ -201,6 +201,7 @@ def main() -> int:
     mc, ec = dict(cfg.get("measure", {})), dict(cfg.get("eval", {}))
     set_seed(int(cfg.get("seed", 42)))
     device = resolve_device(args.device or cfg.get("device", "auto"))
+    refuse_silent_cpu(device, args.device or cfg.get("device", "auto"), bool(args.synthetic), "e2e")
     session = resolve_session(args.session)
     dataset = (args.dataset or cfg.get("dataset", "cifar10")).lower()
     batches = args.batches or ec.get("batches", [1, 8, 16, 32, 64])
