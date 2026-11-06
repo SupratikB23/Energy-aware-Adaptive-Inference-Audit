@@ -55,7 +55,7 @@ eval:
   # marginal-utility knob, UNIT-FREE: accuracy gain per fraction of full-model cost.
   # evaluate.py adds quantiles of the calibration gain/cost ratios to this grid.
   lambdas: [0.001, 0.005, 0.01, 0.02, 0.05]
-  repeats: 3            # energy windows per exit -> mean +- std (KILL-2 3-sigma test)
+  repeats: 10           # energy windows per exit (>=10; mean, SD, 95% CI; KILL-2 3-sigma test)
   iters_per_exit: 1000  # minimum iters per energy window
 
 # --- LTT calibration (C4 deferred; stub values kept for API stability) ---

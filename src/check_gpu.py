@@ -24,14 +24,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import torch
 
 try:
-    from utils import ensure_dir, get_git_hash, load_config, save_json, set_seed, torch_info, vram_info
+    from utils import (ensure_dir, get_git_hash, load_config, resolve_session, save_json, set_seed,
+                       torch_info, vram_info)
 except ImportError:
-    from src.utils import ensure_dir, get_git_hash, load_config, save_json, set_seed, torch_info, vram_info
+    from src.utils import (ensure_dir, get_git_hash, load_config, resolve_session, save_json,
+                           set_seed, torch_info, vram_info)
 
 try:
-    from measure import EnergyMeter, Nvml, HAS_NVML
+    from measure import EnergyMeter, Nvml, HAS_NVML, clock_check, co_tenancy_snapshot
 except ImportError:
-    from src.measure import EnergyMeter, Nvml, HAS_NVML
+    from src.measure import EnergyMeter, Nvml, HAS_NVML, clock_check, co_tenancy_snapshot
 
 
 def _nvidia_smi() -> dict:
@@ -89,17 +91,26 @@ def main() -> int:
     ap.add_argument("--idle-seconds", type=float, default=10.0)
     ap.add_argument("--stress-seconds", type=float, default=10.0)
     ap.add_argument("--results", default=None)
+    ap.add_argument("--session", default=None,
+                    help="session id (default: $PERCOM_SESSION or generated)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     set_seed(int(cfg.get("seed", 42)))
+    session = resolve_session(args.session)
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)
 
+    clocks = clock_check()
+    coexist = co_tenancy_snapshot()
     info = {"torch": torch_info(), "vram": vram_info(), "smi": _nvidia_smi(),
-            "has_nvml": bool(HAS_NVML), "git": get_git_hash(".")}
+            "has_nvml": bool(HAS_NVML), "git": get_git_hash("."),
+            "session_id": session, "clock_check": clocks, "co_tenancy": coexist}
     print(f"[pilot] torch={info['torch']}", flush=True)
     print(f"[pilot] nvidia-smi present={info['smi']['present']}", flush=True)
+    print(f"[pilot] session={session} clock={clocks.get('verdict')} "
+          f"spread={clocks.get('spread_mhz')} MHz processes={coexist.get('compute_process_count')}",
+          flush=True)
 
     if not torch.cuda.is_available() or not HAS_NVML:
         reason = []

@@ -34,14 +34,16 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 try:
-    from utils import ensure_dir, load_config, resolve_device, save_json, set_seed
+    from utils import (ensure_dir, load_config, resolve_device, resolve_session, result_stem,
+                       save_json, set_seed)
 except ImportError:
-    from src.utils import ensure_dir, load_config, resolve_device, save_json, set_seed
+    from src.utils import (ensure_dir, load_config, resolve_device, resolve_session, result_stem,
+                           save_json, set_seed)
 
 try:
-    from models import build_model, default_io, model_from_checkpoint
+    from models import build_model, checkpoint_metadata, default_io, model_from_checkpoint
 except ImportError:
-    from src.models import build_model, default_io, model_from_checkpoint
+    from src.models import build_model, checkpoint_metadata, default_io, model_from_checkpoint
 
 try:
     from train import get_dataloaders, is_synthetic
@@ -198,11 +200,16 @@ def main() -> int:
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--results", default=None)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--session", default=None,
+                    help="session id (default: $PERCOM_SESSION or generated)")
+    ap.add_argument("--run-tag", default=None,
+                    help="short tag appended to the output name")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     set_seed(int(cfg.get("seed", 42)))
     device = resolve_device(args.device or cfg.get("device", "auto"))
+    session = resolve_session(args.session)
     dataset = (args.dataset or cfg.get("dataset", "cifar10")).lower()
     alpha = float(args.alpha if args.alpha is not None else cfg.get("ltt", {}).get("alpha", 0.01))
     delta = float(args.delta if args.delta is not None else cfg.get("ltt", {}).get("delta", 0.10))
@@ -210,7 +217,9 @@ def main() -> int:
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)
 
+    ckpt_meta: dict = {}
     if args.ckpt:
+        ckpt_meta = checkpoint_metadata(args.ckpt)
         model, arch = model_from_checkpoint(args.ckpt, dataset, device, arch=args.arch,
                                             fallback_arch=cfg.get("student", "resnet14"))
     else:
@@ -234,15 +243,19 @@ def main() -> int:
     if sel["selected"] is not None:
         deploy_check = simulate_confidence(model, deploy_loader, device, float(sel["selected"]))
     out = {"dataset": dataset, "arch": arch, "device": str(device), "ckpt": args.ckpt,
+           "session_id": session, "train_seed": ckpt_meta.get("seed"),
+           "run_tag": args.run_tag, "checkpoint_metadata": ckpt_meta,
            "synthetic_data": is_synthetic(test_loader),
            "risk": "P(policy wrong AND full right) (bounded {0,1} loss, Hoeffding)",
            "calibration": sel, "deploy_check": deploy_check}
-    save_json(out, results / f"ltt_{dataset}_{arch}.json")
+    out_name = f"ltt_{result_stem(dataset, arch, ckpt_meta, args.run_tag)}.json"
+    save_json(out, results / out_name)
     print(f"[calibrate] alpha={alpha} delta={delta} selected={sel['selected']} "
           f"certified={sel['certified']}", flush=True)
     if deploy_check:
         print(f"[calibrate] deploy acc={deploy_check['acc']:.4f} "
               f"drop={deploy_check['acc_drop']:.4f} exit_rate={deploy_check['exit_rate']:.3f}", flush=True)
+    print(f"[calibrate] wrote {results / out_name}", flush=True)
     return 0
 
 
