@@ -34,12 +34,13 @@ pip install -r requirements.txt
 python src/test_smoke.py
 python -m pytest src/test_units.py -q
 python src/check_gpu.py --idle-seconds 60 --stress-seconds 30
-python src/train.py --dataset cifar10 --mode teacher
-python src/train.py --dataset cifar10 --mode exit_kd --teacher-ckpt results/cifar10_teacher_resnet18_e20_b64.pt
-python src/evaluate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --batches 1 8 16 32 64
+python src/train.py --dataset cifar10 --mode teacher --seed 42 --results results/p3
+python src/train.py --dataset cifar10 --mode exit_kd --seed 42 --teacher-ckpt results/p3/cifar10_teacher_resnet18_e20_b64_s42.pt --results results/p3
+python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 32 64 --repeats 10 --require-pinned-clock --results results/p3
 ```
+Full pre-submission runbook (3 seeds, locked clocks, cross-session audit): [RUN_PLAN.md](RUN_PLAN.md).
 
 ## Novelty statement (copy into paper, do not reword into a false claim)
-Our controller is an instantiation of rational metareasoning / value-of-computation
-with a *measured* per-exit Joule cost term. Contribution is the validated protocol
-(C1), regime map (C2), and honest benchmark (C3) — not the decision rule.
+The marginal-utility rule we benchmark is an instantiation of rational metareasoning /
+value-of-computation with a *measured* per-exit Joule cost term. The contribution is the
+validated protocol (C1), regime map (C2), and honest end-to-end audit (C3) — not the decision rule.
