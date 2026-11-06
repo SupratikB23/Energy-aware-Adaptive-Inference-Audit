@@ -11,7 +11,7 @@
 > |---|---|---|
 > | **A** | locked clocks, >=10 repeats, randomized order, close background GPU work, mean/SD/95% CI, repeat across sessions | Steps P3.1, P3.3, P3.4, P3.6 |
 > | **B** | >=3 training seeds for the main architectures | Step P3.2 |
-> | **C** | remaining experiments: locked-clock CIFAR e2e at b=1/8/16, more UCI-HAR b=64 repeats, reproducibility tests | Steps P3.4, P3.5, P3.6 |
+> | **C** | remaining experiments: locked-clock CIFAR e2e at b=1/8/16, more UCI-HAR b=64 repeats, reproducibility tests | Steps P3.3b, P3.4, P3.5, P3.5b, P3.6, P3.6b, P3.7 |
 > | **D** | remove any controller-novelty claim | already enforced in AGENTS.md / RESEARCH_STATEMENT.md |
 > | **E** | update the research statement with the new evidence | RESEARCH_STATEMENT.md v3 |
 >
@@ -35,9 +35,18 @@ cd "D:\Users\SUPRATIK\IEEE PERCOM"   # or wherever you cloned it on the box
 #    RTX 50 (sm_120, Blackwell): MUST use cu128:  ... --index-url https://download.pytorch.org/whl/cu128
 # 2) the rest:
 pip install -r requirements.txt
-python -c "import torch;print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+python -c "import torch;print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0), torch.cuda.get_arch_list())"
 nvidia-smi   # note GPU name, driver, power limit
 ```
+**RTX 5060 (this run's target platform, Blackwell sm_120, 8 GB):**
+- Install the **cu128** wheels (second option above). A cu126 wheel imports fine but fails at the
+  first kernel with `no kernel image is available`.
+- The printed arch list MUST contain `sm_120`. If it does not, the wheel is wrong: reinstall.
+- Use a current Game Ready / Studio driver (Blackwell needs R570 or newer). Record its version.
+- Confirm it is the desktop 8 GB card, not a laptop part: a laptop GPU shares power and thermals
+  with the CPU, throttles under a locked clock, and makes the controlled-run claims much weaker.
+  If it is a laptop, say so in the paper and expect `$LOCK` to need lowering.
+- Confirm `nvidia-smi` reports an 8 GB card: the 8 GB VRAM ceiling in AGENTS.md matches; do not raise batch sizes.
 
 ## Step 0b. Smoke + unit tests (both machines)
 ```bash
@@ -55,6 +64,12 @@ python src/check_gpu.py --idle-seconds 60 --stress-seconds 30 --session p3-pilot
   `validation.passed: true`, `validation.basis: counter-vs-poll`, `residual <= 0.05`.
 - `basis: poll-only-unverifiable` = no hardware counter -> no independent reference -> FAIL by design.
 - **KILL-1: residual > 5 %, no power samples, or poll-only -> STOP. Do not benchmark.**
+- **5060 risk:** the 3070 passed this pilot with a hardware energy counter. A new Blackwell card
+  on Windows is untested here. This pilot is the single most important result of the whole
+  plan: if it fails, Phase 3 energy claims are blocked on this card and the options are an
+  updated driver/`nvidia-ml-py`, or falling back to the 3070 for the headline platform.
+  Never relax the check or fall back to 1 Hz / synthetic Joules.
+- Log the 5060 idle power, power limit (nominal TGP about 145 W) and idle clock from `pilot.json`.
 
 ## Step 0d. Controlled-run hygiene (do this before EVERY locked block)
 ```powershell
@@ -249,6 +264,26 @@ Never commit `data/`, `results/`, `*.pt`, `*.csv`.
 | **Total** | first clean pass (incl. 12 min pilot) | **~5.5–6.5 h** |
 | worst case | one retry per block + OOM/slow disk | **~8–9 h** |
 
+### RTX 5060 estimate (what to expect on this card)
+The table above uses RTX 3070 timings. No 5060 timing exists yet, so this is a scaled
+estimate, not a measurement. Update it after the first seed trains.
+
+| Part | Why it scales (or not) | 5060 estimate |
+|---|---|---|
+| Training (P3.2, CIFAR 3 seeds) | Compute-bound: 5060 has 3840 CUDA cores vs 3070's 5888, higher clocks, same ~448 GB/s memory and 8 GB, newer tensor cores + AMP. Expect 0.9–1.3x of the 3070's 1608 s/seed | **80–110 min** |
+| Training (HAR 3 seeds) | Tiny model, launch-bound | 5–10 min |
+| All measurement blocks (P3.3b–P3.6b) | **Wall-clock fixed**: every window is >= 3 s, idle 60 s, warmup 120 s, 10 randomized windows per cell. GPU speed barely changes duration; a lower locked clock only changes iterations per window | same as table, **~3.5 h** of locked/unlocked measurement |
+| Pilot + lock + hygiene + copy-back | manual steps | 30–40 min |
+| **Total, clean pass** | | **~5.5–6.5 h** (low end if training is fast, high end if slow) |
+| **Worst case** | one retry of a locked block (pinned-clock refused, window short) + slower training | **~8–9 h** |
+| Desktop vs laptop | laptop 5060 may throttle at `$LOCK`; blocks then need `$LOCK` lowered and rerun | +1–2 h |
+
+Plan for it as **two sessions**: (1) pilot, unlocked training for seed 42, calibration, P3.3b;
+(2) one continuous Administrator shell for all locked blocks P3.4–P3.7 (~3.5 h). The P3.4 seed
+loop evaluates seeds 43/44, so those checkpoints must exist first: train all 3 seeds (unlocked,
+~55–75 min more) before session 2. If time is short, skip that loop in session 2 and run it
+later in a third, shorter locked session (re-lock with the same `$LOCK`).
+
 Suggested split if time is short: day 1 = pilot + P3.2 seed 42 + P3.3 + P3.3b; day 2 = lock,
 P3.4, P3.5, P3.5b, P3.6, P3.6b, P3.7; then seeds 43/44 (P3.2, P3.4 seed loop) last.
 
@@ -287,6 +322,7 @@ If you also want the **full** Phase 2 matrix re-run at 10 repeats for both workl
 ## Troubleshooting
 | Symptom | Fix |
 |---|---|
+| Training log says `device=cpu`, `vram` all 0.0, GPU 0 % in `nvidia-smi` | CPU-only torch wheel in the venv (PyPI's Windows default). Ctrl+C, then `pip uninstall -y torch torchvision`, install the CUDA wheel (RTX 50: cu128, Step 0a), and check `torch.cuda.is_available()` prints `True`. `train/evaluate/e2e_policy` now exit 2 with this message instead of falling back to the CPU |
 | `pynvml not installed` | `pip install -r requirements.txt` on the GPU box |
 | `nvmlInit() failed` | driver/CUDA mismatch; reinstall driver-matched torch; retry `nvidia-smi` |
 | `has_energy_counter: false` | Poll-only cannot be self-validated -> KILL-1. Needs an external meter |
