@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 import sys
 import time
 from pathlib import Path
@@ -27,21 +28,25 @@ import torch
 import torch.nn.functional as F
 
 try:
-    from utils import (cuda_sync, ensure_dir, get_git_hash, load_config, resolve_device,
-                       save_json, set_seed, torch_info, vram_info)
+    from utils import (cuda_sync, ensure_dir, get_git_hash, load_config, mean_ci95,
+                       resolve_device, resolve_session, result_stem, save_json, set_seed,
+                       torch_info, vram_info)
 except ImportError:
-    from src.utils import (cuda_sync, ensure_dir, get_git_hash, load_config, resolve_device,
-                           save_json, set_seed, torch_info, vram_info)
+    from src.utils import (cuda_sync, ensure_dir, get_git_hash, load_config, mean_ci95,
+                           resolve_device, resolve_session, result_stem, save_json, set_seed,
+                           torch_info, vram_info)
 
 try:
-    from models import build_model, default_io, flops_per_exit, model_from_checkpoint
+    from models import (build_model, checkpoint_metadata, default_io, flops_per_exit,
+                        model_from_checkpoint)
 except ImportError:
-    from src.models import build_model, default_io, flops_per_exit, model_from_checkpoint
+    from src.models import (build_model, checkpoint_metadata, default_io, flops_per_exit,
+                            model_from_checkpoint)
 
 try:
-    from measure import EnergyMeter
+    from measure import EnergyMeter, clock_check, co_tenancy_snapshot
 except ImportError:
-    from src.measure import EnergyMeter
+    from src.measure import EnergyMeter, clock_check, co_tenancy_snapshot
 
 try:
     from train import get_dataloaders, is_synthetic
@@ -53,13 +58,16 @@ except ImportError:
 # Stage 1: per-exit cost table
 # ----------------------------------------------------------------------------
 def measure_latency_per_exit(model, input_shape: tuple, device: torch.device,
-                             iters: int = 200, warmup: int = 20) -> list[float]:
-    """Wall seconds per forward_exit call (mean). CPU-safe."""
+                             iters: int = 200, warmup: int = 20,
+                             order_seed: int = 0) -> list[float]:
+    """Wall seconds per forward_exit call (mean), measured in seeded random order."""
     model.eval()
     n = int(getattr(model, "num_heads", 1))
-    lat = []
+    lat = [0.0] * n
+    order = list(range(n))
+    random.Random(int(order_seed)).shuffle(order)
     with torch.no_grad():
-        for idx in range(n):
+        for idx in order:
             x = torch.randn(*input_shape, device=device)
             for _ in range(warmup):
                 _ = model.forward_exit(x, idx) if hasattr(model, "forward_exit") else model(x)
@@ -69,7 +77,7 @@ def measure_latency_per_exit(model, input_shape: tuple, device: torch.device,
                 _ = model.forward_exit(x, idx) if hasattr(model, "forward_exit") else model(x)
             cuda_sync()
             t1 = time.perf_counter()
-            lat.append((t1 - t0) / max(1, iters))
+            lat[idx] = (t1 - t0) / max(1, iters)
     return lat
 
 
@@ -129,20 +137,25 @@ def gpu_warmup(seconds: float, size: int = 2048) -> dict:
 
 def measure_energy_per_exit(meter, model, input_shape: tuple, device: torch.device,
                             idle_power_w: float | None, iters: int = 1000,
-                            repeats: int = 3, min_window_s: float = 3.0,
-                            warmup: int = 10, mode: str = "cascade") -> dict:
-    """Per-exit marginal Joules PER SAMPLE (mean +- std over `repeats` windows).
+                            repeats: int = 10, min_window_s: float = 3.0,
+                            warmup: int = 10, mode: str = "cascade",
+                            order_seed: int = 0) -> dict:
+    """Per-exit marginal Joules PER SAMPLE (mean +- std + 95 % CI over `repeats`).
 
-    Exits are measured round-robin with a rotated start each repeat so slow
-    thermal/clock drift does not line up with exit index (that would fake a
-    FLOP-vs-Joule ordering effect). Returns None entries when no energy
-    source exists — never fake data.
+    Within each repeat the exits are visited in a seeded random order, and a new
+    permutation is drawn per repeat. That breaks any systematic alignment of
+    slow thermal/clock drift with exit index (which would otherwise fake a
+    FLOP-vs-Joule ordering effect). The realized order is recorded as evidence.
+    Returns None entries when no energy source exists — never fake data.
     """
     n_heads = int(getattr(model, "num_heads", 1))
     batch = int(input_shape[0])
     empty = {"mode": mode, "batch": batch, "mean_j": [None] * n_heads,
-             "std_j": [None] * n_heads, "iters": [None] * n_heads, "windows": [],
-             "adjacent_resolvable_3sigma": [None] * max(0, n_heads - 1)}
+             "std_j": [None] * n_heads, "ci95_j": [None] * n_heads,
+             "ci95_low_j": [None] * n_heads, "ci95_high_j": [None] * n_heads,
+             "iters": [None] * n_heads, "windows": [], "window_order": [],
+             "adjacent_resolvable_3sigma": [None] * max(0, n_heads - 1),
+             "monotone_increasing": None, "negative_marginal": []}
     if meter is None or meter.source == "none":
         return {**empty, "skipped": True, "reason": "no NVML/CUDA on this machine"}
     if idle_power_w is None:
@@ -152,6 +165,30 @@ def measure_energy_per_exit(meter, model, input_shape: tuple, device: torch.devi
     samples: list[list[float]] = [[] for _ in range(n_heads)]
     iters_used = [0] * n_heads
     windows = []
+    rng = random.Random(int(order_seed))
+    window_order: list[dict] = []
+
+    def _run_window(i: int):
+        """Measure one window; rescale `iters` if the realized window is too short.
+
+        `_iters_for_window` probes a short burst, which can overestimate the
+        steady-state per-iteration time (cold cache / clock ramp). The C1 gate is
+        on the REALIZED duration, so we retry instead of silently shipping a
+        sub-3 s window.
+        """
+        nonlocal iters_used
+        res = None
+        for _ in range(3):
+            res = meter.measure_fn(fns[i], iters=iters_used[i], warmup=2,
+                                   idle_power_w=idle_power_w)
+            if res.per_iter_marginal_j is None:
+                return res
+            if min_window_s <= 0 or res.duration_s >= 0.99 * min_window_s:
+                break
+            scale = (min_window_s / max(res.duration_s, 1e-9)) * 1.05
+            iters_used[i] = int(min(200_000, math.ceil(iters_used[i] * scale)))
+        return res
+
     with torch.no_grad():
         fns = [make_exit_fn(model, x, i, mode) for i in range(n_heads)]
         for i, fn in enumerate(fns):
@@ -159,10 +196,11 @@ def measure_energy_per_exit(meter, model, input_shape: tuple, device: torch.devi
                 fn()
             iters_used[i] = _iters_for_window(fn, iters, min_window_s)
         for r in range(max(1, int(repeats))):
-            for k in range(n_heads):
-                i = (k + r) % n_heads
-                res = meter.measure_fn(fns[i], iters=iters_used[i], warmup=2,
-                                       idle_power_w=idle_power_w)
+            order = list(range(n_heads))
+            rng.shuffle(order)
+            window_order.append({"repeat": r, "exit_order": order})
+            for i in order:
+                res = _run_window(i)
                 per_iter = res.per_iter_marginal_j
                 if per_iter is None:
                     return {**empty, "skipped": True,
@@ -170,13 +208,15 @@ def measure_energy_per_exit(meter, model, input_shape: tuple, device: torch.devi
                 samples[i].append(per_iter / batch)
                 windows.append({"exit": i, "repeat": r, "duration_s": res.duration_s,
                                 "iters": res.iters, "source": res.source,
+                                "counter_reset": bool(getattr(res, "counter_reset", False)),
                                 "per_sample_marginal_j": per_iter / batch,
                                 "per_sample_total_j": (res.per_iter_j or 0.0) / batch,
                                 "temp_c": res.device_after.get("temperature_c"),
                                 "clock_mhz": res.device_after.get("clock_graphics_mhz"),
                                 "effective_hz": res.effective_hz})
-    mean = [float(np.mean(s)) for s in samples]
-    std = [float(np.std(s, ddof=1)) if len(s) > 1 else None for s in samples]
+    stats = [mean_ci95(s) for s in samples]
+    mean = [st["mean"] for st in stats]
+    std = [st["sd"] for st in stats]
     resolvable: list[bool | None] = []
     for h in range(n_heads - 1):
         if std[h] is None or std[h + 1] is None:
@@ -187,16 +227,27 @@ def measure_energy_per_exit(meter, model, input_shape: tuple, device: torch.devi
     clocks = [w["clock_mhz"] for w in windows if w["clock_mhz"] is not None and w["clock_mhz"] >= 0]
     temps = [w["temp_c"] for w in windows if w["temp_c"] is not None and w["temp_c"] >= 0]
     spread = (max(clocks) - min(clocks)) if clocks else None
-    return {"mode": mode, "batch": batch, "mean_j": mean, "std_j": std,
-            "cv_pct": [100.0 * s / m if (s is not None and m) else None for s, m in zip(std, mean)],
-            "iters": iters_used, "windows": windows,
+    negative = [i for i, m in enumerate(mean) if m is not None and m < 0.0]
+    return {"mode": mode, "batch": batch, "repeats": max(1, int(repeats)),
+            "mean_j": mean, "std_j": std,
+            "ci95_j": [st["ci95_halfwidth"] for st in stats],
+            "ci95_low_j": [st["ci95_low"] for st in stats],
+            "ci95_high_j": [st["ci95_high"] for st in stats],
+            "cv_pct": [st["cv_pct"] for st in stats],
+            "iters": iters_used, "windows": windows, "window_order": window_order,
+            "order_seed": int(order_seed),
             "clock_mhz_min": min(clocks) if clocks else None,
             "clock_mhz_max": max(clocks) if clocks else None,
             "clock_spread_mhz": spread,
             # DVFS moving under the measurement makes per-exit numbers non-stationary
             "clock_stable": (spread is not None and spread <= 60),
             "temp_c_range": [min(temps), max(temps)] if temps else None,
-            "adjacent_resolvable_3sigma": resolvable, "skipped": False}
+            "adjacent_resolvable_3sigma": resolvable,
+            "monotone_increasing": (all(m is None for m in mean) or
+                                    all(a <= b for a, b in zip(mean, mean[1:]))),
+            # a negative idle-subtracted marginal means the window sat at/below idle
+            "negative_marginal": negative,
+            "skipped": False}
 
 
 def divergence_report(flops: list, mean_j: list, std_j: list) -> dict:
@@ -561,18 +612,27 @@ def main() -> int:
     ap.add_argument("--cost-json", nargs="*", default=None,
                     help="eval JSONs whose batch-1 cascade Joules are POOLED into the policy cost "
                          "table (default: this run's own batch-1 cascade)")
+    ap.add_argument("--order-seed", type=int, default=0,
+                    help="seed for the randomized within-repeat exit order (C1 protocol)")
+    ap.add_argument("--session", default=None,
+                    help="measurement session id (default: $PERCOM_SESSION or generated)")
+    ap.add_argument("--run-tag", default=None,
+                    help="short tag appended to the output name (use A/B for repeated sessions)")
+    ap.add_argument("--require-pinned-clock", action="store_true",
+                    help="refuse to run unless the GPU clock is verifiably pinned")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     mc, ec = dict(cfg.get("measure", {})), dict(cfg.get("eval", {}))
     set_seed(int(cfg.get("seed", 42)))
     device = resolve_device(args.device or cfg.get("device", "auto"))
+    session = resolve_session(args.session)
     dataset = (args.dataset or cfg.get("dataset", "cifar10")).lower()
     batches = args.batches or ec.get("batches", [1, 8, 16, 32, 64])
     taus = [float(t) for t in ec.get("thresholds", [0.6, 0.7, 0.8, 0.9])]
     base_lams = [float(v) for v in ec.get("lambdas", [0.001, 0.01, 0.05])]
     energy_iters = int(args.energy_iters or ec.get("iters_per_exit", 1000))
-    repeats = int(args.repeats or ec.get("repeats", 3))
+    repeats = int(args.repeats or ec.get("repeats", 10))
     min_window_s = float(args.min_window_s if args.min_window_s is not None
                          else mc.get("min_window_seconds", 3.0))
     warmup_s = float(args.warmup_seconds if args.warmup_seconds is not None
@@ -583,13 +643,37 @@ def main() -> int:
     if energy_iters < min_iters:
         print(f"[evaluate] WARNING: --energy-iters {energy_iters} < measure.min_iters {min_iters}; "
               f"numbers are NOT publishable under the C1 protocol.", flush=True)
+    if repeats < 10:
+        print(f"[evaluate] WARNING: --repeats {repeats} < 10; the C1 protocol requires "
+              f">=10 windows per exit, this run is exploratory only.", flush=True)
+    if args.skip_energy and not args.cost_json:
+        print("[evaluate] WARNING: --skip-energy without --cost-json: the policy cost term "
+              "will fall back to FLOPs, not measured Joules.", flush=True)
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)
 
+    # --- clock / co-tenancy evidence (C1); nothing privileged, all recorded ---
+    clocks = clock_check()
+    coexist = co_tenancy_snapshot()
+    print(f"[evaluate] session={session} clock={clocks.get('verdict')} "
+          f"spread={clocks.get('spread_mhz')} MHz processes={coexist.get('compute_process_count')}",
+          flush=True)
+    if args.require_pinned_clock:
+        if not clocks.get("pinned"):
+            print(f"[evaluate] FAILED --require-pinned-clock: {clocks.get('note')}", flush=True)
+            return 2
+    elif not clocks.get("pinned"):
+        print(f"[evaluate] WARNING: clock not verifiably pinned ({clocks.get('note')}); "
+              "controlled runs must use nvidia-smi -lgc.", flush=True)
+
     nc, ch, (Hh, Ww) = default_io(dataset)
+    ckpt_meta: dict = {}
     if args.ckpt:
+        ckpt_meta = checkpoint_metadata(args.ckpt)
         model, arch = model_from_checkpoint(args.ckpt, dataset, device, arch=args.arch,
                                             fallback_arch=cfg.get("student", "resnet14"))
+        if ckpt_meta.get("synthetic_data"):
+            print("[evaluate] WARNING: checkpoint was trained on SYNTHETIC data.", flush=True)
     else:
         arch = args.arch or cfg.get("student", "resnet14")
         model = build_model(dataset, arch, nc, ch).to(device)
@@ -649,7 +733,8 @@ def main() -> int:
                 for mode in ("prefix", "cascade"):
                     e = measure_energy_per_exit(meter, model, shape, device, idle_p,
                                                 iters=energy_iters, repeats=repeats,
-                                                min_window_s=min_window_s, mode=mode)
+                                                min_window_s=min_window_s, mode=mode,
+                                                order_seed=args.order_seed)
                     row[f"energy_{mode}"] = e
                     row[f"divergence_{mode}"] = divergence_report(
                         flops if mode == "prefix" else flops_cascade, e["mean_j"], e["std_j"])
@@ -697,6 +782,10 @@ def main() -> int:
     out = {
         "dataset": dataset, "arch": arch, "device": str(device), "ckpt": args.ckpt,
         "synthetic_data": synthetic,
+        "session_id": session, "train_seed": ckpt_meta.get("seed"),
+        "run_tag": args.run_tag,
+        "checkpoint_metadata": ckpt_meta,
+        "clock_check": clocks, "co_tenancy": coexist,
         "git": get_git_hash("."), "vram": vram_info(), "torch": torch_info(),
         "precision": {"dtype": "float32",
                       "cudnn_allow_tf32": bool(torch.backends.cudnn.allow_tf32),
@@ -704,11 +793,14 @@ def main() -> int:
                       "cudnn_benchmark": bool(torch.backends.cudnn.benchmark)},
         "protocol": {"energy_iters_min": energy_iters, "repeats": repeats,
                      "min_window_s": min_window_s, "warmup": warm_info, "idle_seconds": idle_s,
+                     "order_seed": args.order_seed, "randomized_order": True,
                      "skip_energy": bool(args.skip_energy)},
         "num_heads": int(getattr(model, "num_heads", 1)),
         "flops_per_exit": flops, "flops_per_exit_cascade": flops_cascade,
         "lat_per_exit_s_b1": lat1, "idle_info": idle_info,
         "joules_per_exit_marginal": e1["mean_j"] if e1 else None,
+        "joules_per_exit_ci95": ({"halfwidth": e1["ci95_j"], "low": e1["ci95_low_j"],
+                                  "high": e1["ci95_high_j"]} if e1 else None),
         "cost_source": cost_source,
         **{k: primary[k] for k in ("cost_kind", "cost_table", "marginal_cost_norm",
                                    "nonpositive_marginal_cost", "gains_calib", "lambdas",
@@ -720,7 +812,9 @@ def main() -> int:
         "deploy_full_acc": float(deploy_stats["correct"][:, -1].mean()),
         "deploy_head_acc": [float(v) for v in deploy_stats["correct"].mean(0)],
     }
-    save_json(out, results / f"eval_{dataset}_{arch}.json")
+    out_name = f"eval_{result_stem(dataset, arch, ckpt_meta, args.run_tag)}.json"
+    save_json(out, results / out_name)
+    print(f"[evaluate] wrote {results / out_name}", flush=True)
     print(f"[evaluate] heads={out['num_heads']} flops={flops} cascade_flops={flops_cascade}", flush=True)
     print(f"[evaluate] cost={base} ({cost_kind})", flush=True)
     for r in batch_rows:
