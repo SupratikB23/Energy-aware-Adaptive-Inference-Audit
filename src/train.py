@@ -29,10 +29,10 @@ from torchvision import datasets, transforms
 
 try:
     from utils import (ensure_dir, get_git_hash, load_config, resolve_device, resolve_session,
-                       save_json, set_seed, vram_info)
+                       refuse_silent_cpu, save_json, set_seed, vram_info)
 except ImportError:
     from src.utils import (ensure_dir, get_git_hash, load_config, resolve_device, resolve_session,
-                           save_json, set_seed, vram_info)
+                           refuse_silent_cpu, save_json, set_seed, vram_info)
 
 try:
     from models import build_model, default_io, exit_kd_loss, kd_loss, model_from_checkpoint
@@ -319,6 +319,7 @@ def main() -> int:
     epochs = int(args.epochs or tc.get(epochs_key, 20))
     lr = float(args.lr or tc.get("lr", 0.05))
     device = resolve_device(args.device or cfg.get("device", "auto"))
+    refuse_silent_cpu(device, args.device or cfg.get("device", "auto"), bool(args.synthetic), "train")
     set_seed(seed)
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)

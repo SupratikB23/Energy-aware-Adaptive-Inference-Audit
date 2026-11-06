@@ -56,6 +56,20 @@ def resolve_device(want: str = "auto") -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def refuse_silent_cpu(device: torch.device, requested: str | None, synthetic: bool, who: str) -> None:
+    """Real runs must not silently fall back to the CPU (GPU idle, hours wasted, no energy).
+
+    Allowed: an explicit --device cpu, or --synthetic (smoke/CI runs).
+    """
+    if device.type == "cpu" and (requested or "auto").lower() != "cpu" and not synthetic:
+        print(f"[{who}] FAILED: no CUDA GPU is visible to torch (torch {torch.__version__}, "
+              f"cuda available = {torch.cuda.is_available()}). This is usually a CPU-only torch "
+              "wheel in the active venv. Install the CUDA build first (RTX 50: cu128, see "
+              "RUN_PLAN.md Step 0a), then rerun. Pass --device cpu only if a CPU run is intended.",
+              flush=True)
+        raise SystemExit(2)
+
+
 def ensure_dir(p: str | Path) -> Path:
     p = Path(p)
     p.mkdir(parents=True, exist_ok=True)
