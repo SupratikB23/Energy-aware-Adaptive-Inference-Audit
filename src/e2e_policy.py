@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import sys
 import time
 from pathlib import Path
@@ -33,17 +34,19 @@ import torch
 import torch.nn.functional as F
 
 try:
-    from utils import (cuda_sync, ensure_dir, get_git_hash, load_config, resolve_device,
-                       save_json, set_seed, torch_info, vram_info)
-    from models import default_io, flops_per_exit, model_from_checkpoint
-    from measure import EnergyMeter
+    from utils import (cuda_sync, ensure_dir, get_git_hash, load_config, mean_ci95,
+                       resolve_device, resolve_session, result_stem, save_json, set_seed,
+                       torch_info, vram_info)
+    from models import checkpoint_metadata, default_io, flops_per_exit, model_from_checkpoint
+    from measure import EnergyMeter, clock_check, co_tenancy_snapshot
     from train import get_dataloaders, is_synthetic
     from evaluate import _chosen_perhead, collect_stats, gpu_warmup
 except ImportError:  # pragma: no cover
-    from src.utils import (cuda_sync, ensure_dir, get_git_hash, load_config, resolve_device,
-                           save_json, set_seed, torch_info, vram_info)
-    from src.models import default_io, flops_per_exit, model_from_checkpoint
-    from src.measure import EnergyMeter
+    from src.utils import (cuda_sync, ensure_dir, get_git_hash, load_config, mean_ci95,
+                           resolve_device, resolve_session, result_stem, save_json, set_seed,
+                           torch_info, vram_info)
+    from src.models import checkpoint_metadata, default_io, flops_per_exit, model_from_checkpoint
+    from src.measure import EnergyMeter, clock_check, co_tenancy_snapshot
     from src.train import get_dataloaders, is_synthetic
     from src.evaluate import _chosen_perhead, collect_stats, gpu_warmup
 
@@ -182,23 +185,49 @@ def main() -> int:
     ap.add_argument("--idle-seconds", type=float, default=None)
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--results", default=None)
+    ap.add_argument("--order-seed", type=int, default=0,
+                    help="seed for the randomized within-repeat cell order (C1 protocol)")
+    ap.add_argument("--session", default=None,
+                    help="measurement session id (default: $PERCOM_SESSION or generated)")
+    ap.add_argument("--run-tag", default=None,
+                    help="short tag appended to the output name (use A/B for repeated sessions)")
+    ap.add_argument("--require-pinned-clock", action="store_true",
+                    help="refuse to run unless the GPU clock is verifiably pinned")
+    ap.add_argument("--latency-only", action="store_true",
+                    help="explicitly allow latency-only output when CUDA has no energy source")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     mc, ec = dict(cfg.get("measure", {})), dict(cfg.get("eval", {}))
     set_seed(int(cfg.get("seed", 42)))
     device = resolve_device(args.device or cfg.get("device", "auto"))
+    session = resolve_session(args.session)
     dataset = (args.dataset or cfg.get("dataset", "cifar10")).lower()
     batches = args.batches or ec.get("batches", [1, 8, 16, 32, 64])
-    repeats = int(args.repeats or ec.get("repeats", 3))
+    repeats = int(args.repeats or ec.get("repeats", 10))
     min_window_s = float(args.min_window_s if args.min_window_s is not None else mc.get("min_window_seconds", 3.0))
     warmup_s = float(args.warmup_seconds if args.warmup_seconds is not None else mc.get("warmup_seconds", 120))
     idle_s = float(args.idle_seconds if args.idle_seconds is not None else mc.get("idle_seconds", 60))
+    if repeats < 10:
+        print(f"[e2e] WARNING: --repeats {repeats} < 10; the C1 protocol requires >=10 windows "
+              f"per cell, this run is exploratory only.", flush=True)
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)
 
+    clocks = clock_check()
+    coexist = co_tenancy_snapshot()
+    print(f"[e2e] session={session} clock={clocks.get('verdict')} spread={clocks.get('spread_mhz')} MHz "
+          f"processes={coexist.get('compute_process_count')}", flush=True)
+    if args.require_pinned_clock and not clocks.get("pinned"):
+        print(f"[e2e] FAILED --require-pinned-clock: {clocks.get('note')}", flush=True)
+        return 2
+    if not clocks.get("pinned"):
+        print(f"[e2e] WARNING: clock not verifiably pinned ({clocks.get('note')}); "
+              "controlled runs must use nvidia-smi -lgc.", flush=True)
+
     model, arch = model_from_checkpoint(args.ckpt, dataset, device, arch=args.arch,
                                         fallback_arch=cfg.get("student", "resnet14"))
+    ckpt_meta = checkpoint_metadata(args.ckpt)
     model.eval()
     H = int(model.num_heads)
     nc, ch, (Hh, Ww) = default_io(dataset)
@@ -251,8 +280,18 @@ def main() -> int:
     tables = pooled_tables(args.eval_json)
 
     meter = EnergyMeter(poll_hz=float(mc.get("poll_hz", 150.0))) if device.type == "cuda" else None
+    if device.type == "cuda" and (meter is None or meter.source == "none") and not args.latency_only:
+        print("[e2e] FAILED: CUDA device but no NVML energy source. An end-to-end energy "
+              "result cannot be produced without measured Joules; re-run with --latency-only "
+              "to emit latency-only output explicitly.", flush=True)
+        return 2
+    if device.type == "cuda" and args.latency_only:
+        print("[e2e] WARNING: --latency-only; j_per_sample will be null and this run must "
+              "NOT be cited as an energy result.", flush=True)
     idle_p, idle_info, warm = None, {"skipped": True}, {"skipped": True}
     rows: list[dict] = []
+    rng = random.Random(int(args.order_seed))
+    window_order: list[dict] = []
     try:
         if meter is not None and meter.source != "none":
             cuda_sync()
@@ -276,13 +315,30 @@ def main() -> int:
             samples = {i: [] for i in range(len(cells))}
             lat = {i: [] for i in range(len(cells))}
             clocks = {i: [] for i in range(len(cells))}
+            durations = {i: [] for i in range(len(cells))}
+
+            def _measure_cell(i):
+                res = None
+                for _ in range(3):
+                    res = meter.measure_fn(fns[i], iters=passes[i], warmup=0, idle_power_w=idle_p)
+                    if res.per_iter_marginal_j is None:
+                        return res
+                    if min_window_s <= 0 or res.duration_s >= 0.99 * min_window_s:
+                        return res
+                    scale = (min_window_s / max(res.duration_s, 1e-9)) * 1.05
+                    passes[i] = int(min(1_000_000, math.ceil(passes[i] * scale)))
+                return res
+
             for r in range(repeats):
-                for j in range(len(cells)):
-                    i = (j + r) % len(cells)
+                order = list(range(len(cells)))
+                rng.shuffle(order)
+                window_order.append({"batch": b, "repeat": r, "cell_order": order})
+                for i in order:
                     if meter is not None and meter.source != "none" and idle_p is not None:
-                        res = meter.measure_fn(fns[i], iters=passes[i], warmup=0, idle_power_w=idle_p)
+                        res = _measure_cell(i)
                         if res.per_iter_marginal_j is not None:
                             samples[i].append(res.per_iter_marginal_j / m)
+                        durations[i].append(float(res.duration_s))
                         lat[i].append(1e3 * res.duration_s / (passes[i] * m))
                         clocks[i].append(res.device_after.get("clock_graphics_mhz"))
                     else:
@@ -291,12 +347,15 @@ def main() -> int:
                         for _ in range(passes[i]):
                             fns[i]()
                         cuda_sync()
-                        lat[i].append(1e3 * (time.perf_counter() - t0) / (passes[i] * m))
+                        dur = time.perf_counter() - t0
+                        durations[i].append(float(dur))
+                        lat[i].append(1e3 * dur / (passes[i] * m))
             full_i = next(i for i, (p, _) in enumerate(cells) if p["taus_h"] is None)
             e_full = float(np.mean(samples[full_i])) if samples[full_i] else None
             for i, (p, mode) in enumerate(cells):
                 e = float(np.mean(samples[i])) if samples[i] else None
-                sd = float(np.std(samples[i], ddof=1)) if len(samples[i]) > 1 else None
+                st = mean_ci95(samples[i])
+                sd = st["sd"]
                 f = p["exit_frac_energy_subset"]
                 tab = tables.get(b)
                 pred_table = (None if (p["taus_h"] is None or tab is None)
@@ -310,8 +369,14 @@ def main() -> int:
                 row = {"batch": b, "policy": p["name"], "mode": mode, "taus_h": p["taus_h"],
                        "acc_deploy": p["acc_deploy"], "exit_frac": f, "passes": passes[i],
                        "j_per_sample": e, "j_std": sd,
-                       "cv_pct": (100 * sd / e) if (sd is not None and e) else None,
+                       "j_ci95_halfwidth": st["ci95_halfwidth"],
+                       "j_ci95_low": st["ci95_low"], "j_ci95_high": st["ci95_high"],
+                       "j_sem": st["sem"], "n_windows": st["n"],
+                       "cv_pct": st["cv_pct"],
                        "ms_per_sample": float(np.mean(lat[i])) if lat[i] else None,
+                       "ms_ci95_halfwidth": mean_ci95(lat[i])["ci95_halfwidth"],
+                       "window_duration_s": durations[i],
+                       "min_window_s": min(durations[i]) if durations[i] else None,
                        "clock_mhz": [c for c in clocks[i] if c is not None],
                        "saving_vs_full_pct": (100 * (e_full - e) / e_full) if (e is not None and e_full) else None,
                        "pred_table_j": pred_table, "pred_table_err_pct": summarize_prediction(e, pred_table),
@@ -334,18 +399,25 @@ def main() -> int:
     regime = {"full_by_batch": {b: _e(b, "full") for b in batches},
               "policies_at_b1": {p["name"]: _e(1, p["name"]) for p in policies} if 1 in batches else {}}
     out = {"dataset": dataset, "arch": arch, "ckpt": args.ckpt, "device": str(device),
-           "synthetic_data": synthetic, "git": get_git_hash("."), "torch": torch_info(), "vram": vram_info(),
+           "synthetic_data": synthetic, "session_id": session, "train_seed": ckpt_meta.get("seed"),
+           "run_tag": args.run_tag, "checkpoint_metadata": ckpt_meta,
+           "clock_check": clocks, "co_tenancy": coexist,
+           "git": get_git_hash("."), "torch": torch_info(), "vram": vram_info(),
            "energy_subset_n": m, "num_heads": H, "flops_cascade": flops_c,
            "protocol": {"repeats": repeats, "min_window_s": min_window_s, "warmup": warm,
-                        "idle": idle_info, "modes": args.modes},
+                        "idle": idle_info, "modes": args.modes,
+                        "order_seed": args.order_seed, "randomized_order": True,
+                        "latency_only": bool(args.latency_only)},
+           "window_order": window_order,
            "eval_json": args.eval_json, "table_batches": sorted(tables),
            "policies": policies, "rows": rows, "regime": regime}
-    save_json(out, results / f"e2e_{dataset}_{arch}.json")
+    out_name = f"e2e_{result_stem(dataset, arch, ckpt_meta, args.run_tag)}.json"
+    save_json(out, results / out_name)
     bad = [(p["name"], md, a) for p in policies for md, a in p["runtime_acc"].items()
            if abs(a - p["acc_energy_subset"]) > 0.005]
     if bad:
         print(f"[e2e] WARNING runtime != offline policy accuracy (>0.5 pt): {bad}", flush=True)
-    print(f"[e2e] saved {results / f'e2e_{dataset}_{arch}.json'}", flush=True)
+    print(f"[e2e] saved {results / out_name}", flush=True)
     return 0
 
 
