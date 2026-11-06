@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
+import subprocess
 from dataclasses import asdict, dataclass, field
 
 try:
@@ -39,6 +40,8 @@ __all__ = [
     "Nvml",
     "EnergyMeter",
     "integrate_power",
+    "clock_check",
+    "co_tenancy_snapshot",
     "cuda_sync_if_needed",
 ]
 
@@ -60,6 +63,95 @@ def integrate_power(times: list[float], powers_w: list[float]) -> float:
             raise ValueError("non-monotonic timestamps in power trace")
         e += 0.5 * (powers_w[i] + powers_w[i - 1]) * dt
     return float(e)
+
+
+def _run(cmd: list[str], timeout: float = 15.0) -> tuple[int | None, str, str]:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except FileNotFoundError:
+        return None, "", "not found"
+    except Exception as e:  # pragma: no cover - platform dependent
+        return None, "", repr(e)[:300]
+
+
+def clock_check(samples: int = 8, interval_s: float = 0.12) -> dict:
+    """Best-effort clock-lock evidence, no privileged calls.
+
+    `nvidia-smi -lgc` does not expose a portable "is locked" query. We therefore
+    report two independent facts: (a) whether nvidia-smi's CLOCK report contains
+    an explicit lock marker, and (b) whether the graphics clock is empirically
+    pinned across idle samples. `pinned` is the operational gate used by
+    --require-pinned-clock; it is evidence, not a claim about the driver state.
+    """
+    out = {"available": False, "verdict": "unknown", "pinned": None,
+           "explicit_lock_marker": None, "samples_mhz": [], "spread_mhz": None,
+           "max_mhz": None, "floor_mhz": None, "note": ""}
+    rc, txt, err = _run(["nvidia-smi", "--query-gpu=clocks.gr,clocks.max.gr",
+                         "--format=csv,noheader,nounits"])
+    if rc != 0 or not txt.strip():
+        out["note"] = f"nvidia-smi unavailable ({err.strip() or 'no output'})"
+        return out
+    first = [x.strip() for x in txt.strip().splitlines()[0].split(",")]
+    try:
+        out["max_mhz"] = float(first[1])
+    except Exception:
+        pass
+    vals: list[float] = []
+    for _ in range(max(1, int(samples))):
+        rc, line, _ = _run(["nvidia-smi", "--query-gpu=clocks.gr",
+                            "--format=csv,noheader,nounits"])
+        if rc == 0 and line.strip():
+            try:
+                vals.append(float(line.strip().splitlines()[0]))
+            except ValueError:
+                pass
+        if interval_s > 0:
+            time.sleep(float(interval_s))
+    if not vals:
+        out["note"] = "nvidia-smi returned no clock value"
+        return out
+    spread = max(vals) - min(vals)
+    # An *idle* unlocked GPU also sits at a stable low clock (~210 MHz). A stable
+    # reading is only evidence of a lock if it is also near the max boost clock.
+    floor = (0.5 * out["max_mhz"]) if out["max_mhz"] else 500.0
+    pinned = len(vals) >= 4 and spread <= 30.0 and min(vals) >= floor
+    rc, q, _ = _run(["nvidia-smi", "-q", "-d", "CLOCK"], timeout=20.0)
+    marker = ("locked" in q.lower()) if rc == 0 else None
+    out.update({"available": True, "samples_mhz": vals, "spread_mhz": spread,
+                "pinned": bool(pinned), "explicit_lock_marker": marker,
+                "floor_mhz": floor,
+                "verdict": ("locked" if marker else ("pinned" if pinned else "variable")),
+                "note": ("clock is empirically pinned" if pinned else
+                         ("clock is stable but near idle (not a lock); use nvidia-smi -lgc"
+                          if spread <= 30.0 else
+                          "clock moves; use nvidia-smi -lgc for controlled runs"))})
+    return out
+
+
+def co_tenancy_snapshot(nvml_obj=None) -> dict:
+    """List other compute processes on the GPU. Windows/WDDM may report none."""
+    procs: list[dict] = []
+    if nvml_obj is not None and hasattr(nvml_obj, "compute_processes"):
+        try:
+            procs = nvml_obj.compute_processes()
+        except Exception:
+            procs = []
+    if not procs:
+        rc, txt, _ = _run(["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+                           "--format=csv,noheader"])
+        if rc == 0 and txt.strip():
+            for line in txt.strip().splitlines():
+                parts = [p.strip() for p in line.split(",", 2)]
+                try:
+                    pid = int(parts[0])
+                except Exception:
+                    continue
+                procs.append({"pid": pid, "name": parts[1] if len(parts) > 1 else "?",
+                              "used_mb": parts[2] if len(parts) > 2 else None})
+    return {"compute_process_count": len(procs), "processes": procs,
+            "co_tenant": bool(len(procs) > 1),
+            "note": "count includes this process when it holds a CUDA context"}
 
 
 @dataclass
@@ -97,6 +189,7 @@ class EnergyResult:
     samples: int = 0
     effective_hz: float = 0.0
     source: str = "none"  # counter | poll | none
+    counter_reset: bool = False  # driver counter went backwards; poll used instead
     device_before: dict = field(default_factory=dict)
     device_after: dict = field(default_factory=dict)
 
@@ -180,7 +273,8 @@ class Nvml:
             return False
         try:
             v = pynvml.nvmlDeviceGetTotalEnergyConsumption(self.handle)
-            self._counter_ok = isinstance(v, int) and v > 0
+            # A freshly booted GPU can legitimately report 0 mJ.
+            self._counter_ok = isinstance(v, int) and v >= 0
         except Exception:
             self._counter_ok = False
         return bool(self._counter_ok)
@@ -246,6 +340,24 @@ class Nvml:
         except Exception:
             pass
         return s
+
+    def compute_processes(self) -> list[dict]:
+        """Best-effort list of compute processes on this GPU (co-tenancy audit)."""
+        assert pynvml is not None
+        procs = pynvml.nvmlDeviceGetComputeRunningProcesses(self.handle)
+        out = []
+        for p in procs:
+            pid = int(getattr(p, "pid", -1))
+            used = getattr(p, "usedGpuMemory", None)
+            name = "unknown"
+            try:
+                raw = pynvml.nvmlSystemGetProcessName(pid)
+                name = raw.decode() if isinstance(raw, bytes) else str(raw)
+            except Exception:
+                pass
+            out.append({"pid": pid, "name": name,
+                        "used_mb": (float(used) / (1024 ** 2)) if used else None})
+        return out
 
 
 class EnergyMeter:
@@ -359,8 +471,12 @@ class EnergyMeter:
         dev_after = self.nvml.device_state() if self.nvml else DeviceState()
 
         e_counter = None
-        if e1_mj is not None and self._e0_mj is not None and e1_mj >= self._e0_mj:
-            e_counter = (e1_mj - self._e0_mj) / 1000.0  # mJ -> J
+        counter_reset = False
+        if e1_mj is not None and self._e0_mj is not None:
+            if e1_mj >= self._e0_mj:
+                e_counter = (e1_mj - self._e0_mj) / 1000.0  # mJ -> J
+            else:
+                counter_reset = True
         e_poll = None
         if len(self._times) >= 2:
             try:
@@ -395,6 +511,7 @@ class EnergyMeter:
             samples=len(self._times),
             effective_hz=(len(self._times) / duration) if duration > 0 else 0.0,
             source=src,
+            counter_reset=counter_reset,
             device_before=self._dev_before.to_dict() if self._dev_before else {},
             device_after=dev_after.to_dict(),
         )

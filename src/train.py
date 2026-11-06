@@ -28,9 +28,11 @@ from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
 try:
-    from utils import ensure_dir, get_git_hash, load_config, resolve_device, save_json, set_seed, vram_info
+    from utils import (ensure_dir, get_git_hash, load_config, resolve_device, resolve_session,
+                       save_json, set_seed, vram_info)
 except ImportError:
-    from src.utils import ensure_dir, get_git_hash, load_config, resolve_device, save_json, set_seed, vram_info
+    from src.utils import (ensure_dir, get_git_hash, load_config, resolve_device, resolve_session,
+                           save_json, set_seed, vram_info)
 
 try:
     from models import build_model, default_io, exit_kd_loss, kd_loss, model_from_checkpoint
@@ -297,10 +299,16 @@ def main() -> int:
     ap.add_argument("--device", default=None)
     ap.add_argument("--grad-accum", type=int, default=None, help="overrides train.grad_accum")
     ap.add_argument("--num-workers", type=int, default=None, help="overrides train.num_workers (0 on Windows)")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="training seed (default: config seed); always encoded in the tag")
+    ap.add_argument("--session", default=None,
+                    help="training session id (default: $PERCOM_SESSION or generated)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     dataset = (args.dataset or cfg.get("dataset", "cifar10")).lower()
+    seed = int(args.seed if args.seed is not None else cfg.get("seed", 42))
+    session = resolve_session(args.session)
     tc = dict(cfg.get("train", {}))
     if args.grad_accum is not None:
         tc["grad_accum"] = max(1, int(args.grad_accum))
@@ -311,13 +319,13 @@ def main() -> int:
     epochs = int(args.epochs or tc.get(epochs_key, 20))
     lr = float(args.lr or tc.get("lr", 0.05))
     device = resolve_device(args.device or cfg.get("device", "auto"))
-    set_seed(int(cfg.get("seed", 42)))
+    set_seed(seed)
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)
 
     train_loader, test_loader, nc, ch = get_dataloaders(
         dataset, cfg.get("data_root", "./data"), batch_size,
-        int(tc.get("num_workers", 0)), int(cfg.get("seed", 42)),
+        int(tc.get("num_workers", 0)), seed,
         force_synthetic=args.synthetic)
 
     if args.mode == "teacher":
@@ -370,14 +378,17 @@ def main() -> int:
         traceback.print_exc()
         return 1
 
-    tag = f"{dataset}_{args.mode}_{arch}_e{epochs}_b{batch_size}"
+    tag = f"{dataset}_{args.mode}_{arch}_e{epochs}_b{batch_size}_s{seed}"
     ckpt = results / f"{tag}.pt"
     torch.save({"state_dict": model.state_dict(), "arch": arch, "dataset": dataset,
-                "mode": args.mode, "epochs": epochs, "synthetic_data": synthetic}, ckpt)
+                "mode": args.mode, "epochs": epochs, "batch_size": batch_size,
+                "seed": seed, "session_id": session, "synthetic_data": synthetic,
+                "teacher_ckpt": args.teacher_ckpt, "git": get_git_hash(".")}, ckpt)
     save_json({"tag": tag, "mode": args.mode, "arch": arch, "dataset": dataset,
                "epochs": epochs, "batch_size": batch_size, "lr": lr,
                "grad_accum": int(tc.get("grad_accum", 1)),
-               "synthetic_data": synthetic, "seed": int(cfg.get("seed", 42)),
+               "synthetic_data": synthetic, "seed": seed, "session_id": session,
+               "teacher_ckpt": args.teacher_ckpt,
                "history": hist, "seconds": time.time() - t0,
                "git": get_git_hash("."), "vram": vram_info()}, results / f"{tag}.json")
     print(f"[train] saved {ckpt}", flush=True)
