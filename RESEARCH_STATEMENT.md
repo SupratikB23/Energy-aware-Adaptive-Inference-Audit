@@ -87,8 +87,15 @@ decision rule is not the contribution.
   state honestly: no battery-powered device yet. A Jetson / RPi+INA219 cross-check is future work.
 
 ## Threats to validity (state them)
-- Single GPU model (RTX 3070), Windows. Phase 1/2 ran with ~19 background GPU processes; Phase 3
-  closes them and records a co-tenancy snapshot per run.
+- Single headline GPU, Windows. Phase 1/2 ran on an RTX 3070 with ~19 background GPU processes;
+  Phase 3 may run on a different card (e.g. RTX 5060). Phase 3 is then a self-contained platform
+  (own checkpoints, own locked clock `$LOCK`, never pooled with 3070 numbers); the 3070 data is
+  reported only as a labelled, preliminary secondary platform. Phase 3 closes background
+  processes and records a co-tenancy snapshot per run. No battery-powered device.
+- Overhead is quantified as measured end-to-end energy minus the additive per-exit prediction
+  (`pred_table_err_pct`, a per-cell point value; the measured side carries the 95 % CI), and compaction vs batch-wait. We do **not** decompose it into
+  kernel-launch / synchronisation / host-decision time, so any such mechanism is a hypothesis,
+  not a measured result.
 - Batch-1 per-exit numbers are DVFS-confounded unless clocks are locked. Phase 2 showed that
   locking at 1500 MHz fixes resolvability; Phase 3 re-runs every headline cell locked, with
   `--require-pinned-clock` as a hard gate.
