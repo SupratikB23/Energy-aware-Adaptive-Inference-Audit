@@ -206,8 +206,8 @@ If you also want the **full** Phase 2 matrix re-run at 10 repeats for both workl
 ## Phase 3 decision table
 | Check | Where | Meaning |
 |---|---|---|
-| Telemetry still valid | P3.0 `check_gpu.py` | If KILL-1 fires, stop: no policy runs on bad telemetry |
-| Clock actually locked | P3.0d + every JSON `clock_check.pinned` | `--require-pinned-clock` refuses to run otherwise |
+| Telemetry still valid | Step 0c `check_gpu.py` | If KILL-1 fires, stop: no policy runs on bad telemetry |
+| Clock actually locked | Step 0d + every JSON `clock_check.pinned` | `--require-pinned-clock` refuses to run otherwise |
 | No co-tenant | `co_tenancy.compute_process_count <= 1` | >1 means another GPU process is shifting idle power |
 | Seed robustness | P3.2 JSONs, 3 seeds | Final-head spread > 1.5 pts => soften accuracy claims |
 | Per-exit resolvable at b=1 | `adjacent_resolvable_3sigma` | If false at 10 locked repeats, it is a C1 limit, not a bug |
