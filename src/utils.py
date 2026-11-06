@@ -5,6 +5,7 @@ CPU-safe. No NVML import here. All GPU queries live in measure.py / check_gpu.py
 from __future__ import annotations
 
 import json
+import os
 import random
 import subprocess
 import sys
@@ -63,6 +64,71 @@ def ensure_dir(p: str | Path) -> Path:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def new_session_id() -> str:
+    """Short, sortable, collision-resistant id for one measurement session."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{os.urandom(3).hex()}"
+
+
+def resolve_session(explicit: str | None = None) -> str:
+    """Explicit --session > PERCOM_SESSION env var > freshly generated id."""
+    s = (explicit or os.environ.get("PERCOM_SESSION") or "").strip()
+    return s or new_session_id()
+
+
+def result_stem(dataset: str, arch: str, ckpt_meta: dict | None = None,
+                tag: str | None = None) -> str:
+    """Stable output stem; a checkpoint's training seed prevents seed collisions.
+
+    `tag` separates repeated sessions of the same checkpoint (e.g. run A/B), so
+    cross-session repeats never overwrite each other.
+    """
+    seed = (ckpt_meta or {}).get("seed")
+    stem = f"{dataset}_{arch}" + (f"_s{seed}" if seed is not None else "")
+    if tag:
+        safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in str(tag))[:40]
+        stem += f"_{safe}"
+    return stem
+
+
+# Two-sided 95% Student-t critical values (df -> t). df > 30 uses the normal limit.
+_T95 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+    8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145,
+    15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086, 21: 2.080,
+    22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048,
+    29: 2.045, 30: 2.042,
+}
+
+
+def t_critical_95(df: int) -> float:
+    if df <= 0:
+        raise ValueError("df must be > 0")
+    return _T95.get(int(df), 1.960)
+
+
+def mean_ci95(values) -> dict:
+    """Mean, sample SD, SEM and two-sided 95% CI (Student-t). None-safe."""
+    vals = [float(v) for v in values if v is not None]
+    n = len(vals)
+    if n == 0:
+        return {"n": 0, "mean": None, "sd": None, "sem": None,
+                "ci95_low": None, "ci95_high": None, "ci95_halfwidth": None,
+                "cv_pct": None}
+    mean = float(np.mean(vals))
+    if n == 1:
+        return {"n": 1, "mean": mean, "sd": None, "sem": None,
+                "ci95_low": None, "ci95_high": None, "ci95_halfwidth": None,
+                "cv_pct": None}
+    sd = float(np.std(vals, ddof=1))
+    sem = sd / float(np.sqrt(n))
+    half = t_critical_95(n - 1) * sem
+    return {"n": n, "mean": mean, "sd": sd, "sem": sem,
+            "ci95_low": mean - half, "ci95_high": mean + half,
+            "ci95_halfwidth": half,
+            "cv_pct": (100.0 * sd / abs(mean)) if mean else None}
 
 
 def get_git_hash(repo: str | Path = ".") -> str:

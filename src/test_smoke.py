@@ -166,8 +166,9 @@ def t_evaluate_policies():
     r4 = policy_marginal_utility(st, 0.01, gains, marg, flops)
     for r in (r1, r2, r3, r4):
         assert 0 <= r["acc"] <= 1 and 0 <= r["exit_rate"] <= 1, r
-    pts = [{"acc": 0.9, "avg_cost": 10}, {"acc": 0.8, "avg_cost": 5}, {"acc": 0.85, "avg_cost": 7}]
-    assert pareto_frontier(pts) == [0, 1, 2] or set(pareto_frontier(pts)) <= {0, 1, 2}
+    pts = [{"acc": 0.9, "avg_cost": 10}, {"acc": 0.8, "avg_cost": 5}, {"acc": 0.85, "avg_cost": 7},
+           {"acc": 0.8, "avg_cost": 8}]  # last one is dominated by index 1
+    assert pareto_frontier(pts) == [0, 1, 2]
     lat = measure_latency_per_exit(m, (1, 3, 32, 32), device, iters=5, warmup=1)
     assert len(lat) == 4 and all(v > 0 for v in lat)
     return f"policies acc={[round(r['acc'],3) for r in (r1,r2,r3,r4)]}"
