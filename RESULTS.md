@@ -8,6 +8,10 @@ cross-session audit. Its results are not in this file yet — do not present Pha
 final until Phase 3 is complete.** Research framing and kill criteria:
 [percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md).
 
+> **Platform note.** Everything in this file (Phase 1/2) was measured on the RTX 3070 below. If
+> Phase 3 is run on a different GPU, it is a separate platform and its numbers are not pooled
+> with these; this file is then the preliminary secondary-platform record.
+
 **Setup.** NVIDIA GeForce RTX 3070 (8 GB, sm_86, 270 W limit), driver 591.86, torch 2.7.0+cu126,
 Python 3.11.9, Windows. FP32 inference (cuDNN TF32 on, matmul TF32 off, cudnn.benchmark on).
 Real CIFAR-10 everywhere (`synthetic_data: false` in every file). Seed 42.
