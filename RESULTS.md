@@ -1,16 +1,22 @@
 # RESULTS — measured-energy audit of early-exit policies (CIFAR-10, RTX 3070)
 
-Scope: RUN_PLAN Phase 1 (Steps 1–4) **and Phase 2 (Steps 5, 7, 8)** on one GPU box. All numbers
-below are read from `results/` (files listed in §9 and §10.8). §0 is the current verdict; §10 holds
-the Phase 2 results. **Step 6 (CIFAR end-to-end) has not been run yet.** Research framing and kill criteria:
+Scope: RUN_PLAN Phase 1 (Steps 1–4) **and Phase 2 (Steps 5–8)** on one GPU box. All numbers
+below are read from `results/` (files listed in §9, §10.8 and §11.7). §0 is the current verdict;
+§10–§11 hold the Phase 2 results. **Phase 3 (RUN_PLAN P3.1–P3.8) is the pre-submission
+hardening pass: 3 training seeds, locked clocks everywhere, >=10 randomized windows, 95 % CIs,
+cross-session audit. Its results are not in this file yet — do not present Phase 2 numbers as
+final until Phase 3 is complete.** Research framing and kill criteria:
 [percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md).
 
 **Setup.** NVIDIA GeForce RTX 3070 (8 GB, sm_86, 270 W limit), driver 591.86, torch 2.7.0+cu126,
 Python 3.11.9, Windows. FP32 inference (cuDNN TF32 on, matmul TF32 off, cudnn.benchmark on).
 Real CIFAR-10 everywhere (`synthetic_data: false` in every file). Seed 42.
 Energy = NVML hardware energy counter, idle-subtracted, J **per sample**.
-Protocol: 60 s idle baseline → 120 s warmup → per exit 3 repeated windows, each ≥1000 iters
-and ≥3 s, round-robin order. Two independent full benchmark runs (`eval_run1`, `eval_run2`).
+**Phase 1/2 protocol:** 60 s idle baseline → 120 s warmup → per exit 3 repeated windows, each
+≥1000 iters and ≥3 s, rotated round-robin order. Two independent full benchmark runs
+(`eval_run1`, `eval_run2`). **Phase 3 protocol:** the same window rules, but >=10 repeats,
+seeded randomized order, Student-t 95 % CIs, pinned-clock evidence, co-tenancy snapshot and a
+`session_id`; `audit verify` is the publishability gate.
 
 ---
 
@@ -250,7 +256,12 @@ marginal-utility point's accuracy):
 - "FLOPs get the order wrong" (KILL-3).
 - "Marginal-utility beats confidence" as a strong claim (§6 caveats).
 
-## 8. Recommended next runs (in priority order)
+## 8. Recommended next runs — SUPERSEDED by RUN_PLAN Phase 3
+
+Items 1–5 below were the Phase 2 wish list; all five are now implemented as Phase 3 gates in
+[RUN_PLAN.md](RUN_PLAN.md) (P3.0d locked clocks + co-tenancy; P3.2 three seeds; P3.4 >=10 repeats;
+P3.5 locked CIFAR e2e; P3.6 HAR b=64 sessions; P3.7 `audit verify` / `audit compare`).
+The original list is kept only as history:
 1. **Lock GPU clocks** for batch-1 measurements (`nvidia-smi -lgc 1905,1905`, needs admin) and raise
    `--repeats` to ≥10 for batch 1 and 8. This directly tests whether the batch-1 noise is DVFS
    (fixable) or intrinsic.
@@ -525,13 +536,20 @@ a clean secondary contribution.
    marginal-utility ≡ per-head thresholds.
 
 ### 11.6 Remaining gaps (honest list for the limitations section)
-1. CIFAR e2e is unlocked; a locked rerun (b = 1, 8, 16) would close the DVFS objection there too. ~10 min.
-2. HAR b = 64 baseline is not reproducible (30 % between runs); more repeats at large batch would help.
-3. One GPU (RTX 3070), Windows, ~19 background GPU processes, one training seed per model, FP32,
-   one exit placement per architecture, no battery-powered device.
+1. **CIFAR e2e was unlocked.** Phase 3 P3.5 re-runs b = 1, 8, 16 at 1500 MHz with 10 randomized
+   windows and `--require-pinned-clock`; until then, §11.1 carries the DVFS caveat.
+2. **HAR b = 64 baseline was not reproducible** (30 % between runs). Phase 3 P3.6 runs two
+   independent locked sessions at b = 64 and `audit compare` reports the agreement; the paper must
+   quote the between-session error bar rather than a single cell.
+3. One GPU (RTX 3070), Windows, ~19 background GPU processes in Phase 1/2 (Phase 3 records a
+   co-tenancy snapshot and requires <=1 compute process), one training seed per model in Phase 1/2
+   (Phase 3 adds seeds 42/43/44), FP32, one exit placement per architecture, no battery-powered device.
 4. HAR KD hurt (teacher 92.74 % < CE student 93.42 %); report `exit_ce` as the stronger baseline.
 
 ### 11.7 Files added in this pass
 `runs/e2e_cifar/e2e_cifar10_resnet14.json`, `runs/e2e_har/e2e_har_harcnn.json`,
 `runs/e2e_har_locked/e2e_har_harcnn.json`. The superseded `results/e2e_har_harcnn.json` (no
 `--eval-json`) is kept only for the reproducibility comparison in §11.2.
+
+Phase 3 outputs go to `results/p3/` with seed-suffixed names (`*_s42`, `*_s43`, `*_s44`) and the
+`audit_verify.json` / `audit_compare.json` files; they are **not** part of this results table yet.
