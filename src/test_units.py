@@ -519,6 +519,17 @@ def _run(args, tmp_path):
                           cwd=str(ROOT), capture_output=True, text=True, timeout=900)
 
 
+def test_cli_train_refuses_silent_cpu_fallback(tmp_path):
+    """Real data + device auto + no CUDA must fail loudly, not train for hours on the CPU."""
+    import torch
+    if torch.cuda.is_available():
+        pytest.skip("CUDA present; the guard only fires on a CPU-only torch")
+    r = _run(["src/train.py", "--dataset", "kws", "--mode", "teacher", "--arch", "dscnn-s",
+              "--epochs", "1"], tmp_path)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "no CUDA GPU" in r.stdout
+
+
 def test_cli_check_gpu_cpu_box(tmp_path):
     r = _run(["src/check_gpu.py", "--idle-seconds", "0.1", "--stress-seconds", "0.1"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
