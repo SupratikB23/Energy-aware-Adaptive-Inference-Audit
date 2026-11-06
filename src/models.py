@@ -248,6 +248,17 @@ def load_checkpoint(path: str, device) -> dict:
     return {"state_dict": sd}
 
 
+def checkpoint_metadata(path: str, device="cpu") -> dict:
+    """Small metadata view of a train.py checkpoint (never the state dict)."""
+    try:
+        ck = load_checkpoint(path, device)
+    except Exception:
+        return {}
+    keys = ("arch", "dataset", "mode", "seed", "epochs", "batch_size",
+            "synthetic_data", "session_id", "git")
+    return {k: ck[k] for k in keys if k in ck}
+
+
 def model_from_checkpoint(path: str, dataset: str, device, arch: str | None = None,
                           fallback_arch: str = "resnet14") -> tuple[nn.Module, str]:
     """Build the model a checkpoint was trained as, then load its weights.

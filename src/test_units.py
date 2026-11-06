@@ -477,10 +477,18 @@ def test_energy_table_repeats_round_robin_and_resolvability(tagged_exit_fns):
     e = evaluate.measure_energy_per_exit(meter, m, (4, 1, 49, 40), torch.device("cpu"),
                                          idle_power_w=20.0, iters=2, repeats=3, min_window_s=0.0)
     assert not e["skipped"]
-    assert meter.order == [0, 1, 2, 1, 2, 0, 2, 0, 1]  # rotated each repeat
+    # randomized within-repeat order: every exit once per repeat, order not sorted
+    assert len(meter.order) == 9
+    assert sorted(meter.order[:3]) == [0, 1, 2]
+    assert sorted(meter.order[3:6]) == [0, 1, 2]
+    assert sorted(meter.order[6:]) == [0, 1, 2]
+    assert e["window_order"] and all(sorted(w["exit_order"]) == [0, 1, 2]
+                                     for w in e["window_order"])
     assert e["mean_j"] == pytest.approx([0.1, 0.2, 0.4], abs=1e-3)  # per SAMPLE (batch 4)
     assert all(s is not None and s > 0 for s in e["std_j"])
+    assert all(v is not None for v in e["ci95_j"])
     assert e["adjacent_resolvable_3sigma"] == [True, True]
+    assert e["negative_marginal"] == []
     flat = evaluate.measure_energy_per_exit(_FakeMeter([1.0, 1.0, 1.0], noise=0.05), m,
                                             (1, 1, 49, 40), torch.device("cpu"), 20.0,
                                             iters=2, repeats=3, min_window_s=0.0)
@@ -521,30 +529,41 @@ def test_cli_train_calibrate_evaluate_pipeline(tmp_path):
     r = _run(["src/train.py", "--dataset", "kws", "--mode", "teacher", "--arch", "dscnn-s",
               "--epochs", "1", "--batch-size", "128", "--device", "cpu"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    tck = tmp_path / "kws_teacher_dscnn-s_e1_b128.pt"
+    tck = tmp_path / "kws_teacher_dscnn-s_e1_b128_s42.pt"
     r = _run(["src/train.py", "--dataset", "kws", "--mode", "exit_kd", "--arch", "dscnn-s",
               "--teacher-ckpt", str(tck), "--epochs", "1", "--batch-size", "128",
               "--device", "cpu"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    ck = tmp_path / "kws_exit_kd_dscnn-s_e1_b128.pt"
-    meta = json.loads((tmp_path / "kws_exit_kd_dscnn-s_e1_b128.json").read_text())
+    ck = tmp_path / "kws_exit_kd_dscnn-s_e1_b128_s42.pt"
+    meta = json.loads((tmp_path / "kws_exit_kd_dscnn-s_e1_b128_s42.json").read_text())
     assert meta["synthetic_data"] is True
+    assert meta["seed"] == 42 and meta["session_id"]
 
     r = _run(["src/calibrate.py", "--ckpt", str(ck), "--dataset", "kws", "--synthetic"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    ltt = json.loads((tmp_path / "ltt_kws_dscnn-s.json").read_text())
+    ltt = json.loads((tmp_path / "ltt_kws_dscnn-s_s42.json").read_text())
     assert ltt["synthetic_data"] is True and ltt["arch"] == "dscnn-s"
+    assert ltt["train_seed"] == 42
 
     # no --arch: must be read from the checkpoint (RUN_PLAN step 5)
     r = _run(["src/evaluate.py", "--ckpt", str(ck), "--dataset", "kws", "--synthetic",
               "--batches", "1", "4", "--lat-iters", "8"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    ev = json.loads((tmp_path / "eval_kws_dscnn-s.json").read_text())
+    ev = json.loads((tmp_path / "eval_kws_dscnn-s_s42.json").read_text())
     assert ev["synthetic_data"] is True and ev["arch"] == "dscnn-s"
+    assert ev["train_seed"] == 42 and ev["session_id"]
+    assert ev["protocol"]["randomized_order"] is True
+    assert ev["clock_check"] and "pinned" in ev["clock_check"]
+    assert ev["co_tenancy"] and "compute_process_count" in ev["co_tenancy"]
     assert ev["cost_kind"].startswith("flops-cascade")
     assert [b["batch"] for b in ev["batch_rows"]] == [1, 4]
     assert ev["batch_rows"][0]["energy_cascade"]["skipped"] is True  # no fake Joules on CPU
     assert ev["pareto_idx"] and all(0 <= i < len(ev["points"]) for i in ev["pareto_idx"])
+    mu = [p["avg_exit"] for p in ev["points"] if p["policy"] == "marginal-utility"]
+    if all(g == 0 for g in ev["gains_calib"]):  # random labels: later heads buy nothing
+        assert set(mu) == {0.0}, mu
+    else:
+        assert len(set(mu)) > 1, f"marginal-utility grid degenerate: {mu}"
     mu = [p["avg_exit"] for p in ev["points"] if p["policy"] == "marginal-utility"]
     if all(g == 0 for g in ev["gains_calib"]):  # random labels: later heads buy nothing
         assert set(mu) == {0.0}, mu
@@ -636,7 +655,7 @@ def test_cli_train_accepts_documented_flags(tmp_path):
               "--epochs", "1", "--batch-size", "256", "--device", "cpu", "--synthetic",
               "--grad-accum", "2", "--num-workers", "0"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert json.loads((tmp_path / "kws_exit_ce_dscnn-s_e1_b256.json").read_text())["grad_accum"] == 2
+    assert json.loads((tmp_path / "kws_exit_ce_dscnn-s_e1_b256_s42.json").read_text())["grad_accum"] == 2
 
 
 def test_cli_train_exit_kd_without_teacher_fails_cleanly(tmp_path):
@@ -821,16 +840,28 @@ def test_cli_evaluate_skip_energy_with_cost_json(tmp_path):
     assert ev["batch_rows"] == [] and "kill4" in ev and "kill4" in ev["flops_sensitivity"]
 
 
+def test_cli_evaluate_require_pinned_clock_refuses_unpinned(tmp_path):
+    """--require-pinned-clock is the final-run gate; an unpinned box must not run."""
+    r = _run(["src/evaluate.py", "--dataset", "kws", "--arch", "dscnn-s", "--synthetic",
+              "--skip-energy", "--require-pinned-clock", "--lat-iters", "4"], tmp_path)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "require-pinned-clock" in r.stdout
+
+
 def test_cli_e2e_policy_cpu(tmp_path):
     ck = tmp_path / "k.pt"
     _save_ckpt(ck, "kws", "dscnn-s")
     r = _run(["src/e2e_policy.py", "--ckpt", str(ck), "--dataset", "kws", "--synthetic",
               "--device", "cpu", "--batches", "1", "8", "--taus", "0.2", "--perhead", "0.3,0.2",
-              "--repeats", "1", "--min-window-s", "0.05", "--max-samples", "64"], tmp_path)
+              "--repeats", "2", "--min-window-s", "0.05", "--max-samples", "64",
+              "--run-tag", "A"], tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    d = json.loads((tmp_path / "e2e_kws_dscnn-s.json").read_text())
-    assert d["synthetic_data"] is True
+    d = json.loads((tmp_path / "e2e_kws_dscnn-s_A.json").read_text())
+    assert d["synthetic_data"] is True and d["run_tag"] == "A"
+    assert d["protocol"]["randomized_order"] is True and d["window_order"]
     assert all(row["j_per_sample"] is None for row in d["rows"])  # CPU: never fake Joules
+    assert all(row["n_windows"] == 0 for row in d["rows"])
+    assert all(row["ms_ci95_halfwidth"] is not None for row in d["rows"])
     assert {(row["batch"], row["mode"]) for row in d["rows"]} >= {(1, "compact"), (8, "compact"), (8, "batchwait")}
     for p in d["policies"]:
         for acc in p["runtime_acc"].values():
@@ -846,3 +877,163 @@ def test_e2e_perhead_from_eval(tmp_path):
     p = tmp_path / "e.json"
     p.write_text(json.dumps(d))
     assert e2e_policy.perhead_from_eval(str(p)) == [[0.99, 0.9, 0.8], [0.95, 0.9, 0.8]]
+
+# ----------------------------------------------------------------------------
+# v3: C1 reliability protocol (sessions, CIs, randomized order, audit gates)
+# ----------------------------------------------------------------------------
+import audit  # noqa: E402
+import utils  # noqa: E402
+
+
+def test_mean_ci95_matches_student_t_and_is_none_safe():
+    st = utils.mean_ci95([1.0, 2.0, 3.0, 4.0])
+    assert st["n"] == 4 and st["mean"] == pytest.approx(2.5)
+    assert st["sd"] == pytest.approx(1.2909944, rel=1e-6)
+    assert st["sem"] == pytest.approx(st["sd"] / 2.0, rel=1e-6)
+    assert st["ci95_halfwidth"] == pytest.approx(utils.t_critical_95(3) * st["sem"], rel=1e-5)
+    assert st["ci95_low"] < st["mean"] < st["ci95_high"]
+    assert utils.mean_ci95([None, None])["n"] == 0
+    assert utils.mean_ci95([5.0])["sd"] is None
+    assert utils.t_critical_95(9) == pytest.approx(2.262)
+    with pytest.raises(ValueError):
+        utils.t_critical_95(0)
+
+
+def test_session_and_result_stem_namespacing(monkeypatch):
+    monkeypatch.delenv("PERCOM_SESSION", raising=False)
+    a, b = utils.new_session_id(), utils.new_session_id()
+    assert a != b and "T" in a
+    assert utils.resolve_session("s1") == "s1"
+    monkeypatch.setenv("PERCOM_SESSION", "env-sess")
+    assert utils.resolve_session(None) == "env-sess"
+    assert utils.resolve_session("explicit") == "explicit"
+    assert utils.result_stem("cifar10", "resnet14", {"seed": 7}) == "cifar10_resnet14_s7"
+    assert utils.result_stem("cifar10", "resnet14", {}) == "cifar10_resnet14"
+    assert utils.result_stem("cifar10", "resnet14", {"seed": 7}, "A") == "cifar10_resnet14_s7_A"
+    assert utils.result_stem("cifar10", "resnet14", {}, "a/b c") == "cifar10_resnet14_a-b-c"
+
+
+def test_randomized_order_is_seeded_and_differs_across_seeds(tagged_exit_fns):
+    m = models.build_model("kws", "dscnn-s", 12, 1).eval()
+    orders = []
+    for seed in (0, 0, 99):
+        meter = _FakeMeter([0.4, 0.8, 1.6], noise=0.001)
+        e = evaluate.measure_energy_per_exit(meter, m, (2, 1, 49, 40), torch.device("cpu"),
+                                             idle_power_w=20.0, iters=2, repeats=4,
+                                             min_window_s=0.0, order_seed=seed)
+        orders.append([w["exit_order"] for w in e["window_order"]])
+        assert e["order_seed"] == seed and e["repeats"] == 4
+        assert all(sorted(w) == [0, 1, 2] for w in orders[-1])
+    assert orders[0] == orders[1]
+    assert orders[0] != orders[2]
+
+
+def _good_eval_doc():
+    win = {"duration_s": 3.5, "iters": 1200}
+    return {
+        "dataset": "kws", "arch": "dscnn-s", "synthetic_data": False,
+        "session_id": "s-1", "clock_check": {"pinned": True, "spread_mhz": 5.0},
+        "co_tenancy": {"compute_process_count": 0},
+        "protocol": {"repeats": 10},
+        "batch_rows": [{"batch": 1, "energy_cascade": {
+            "skipped": False, "windows": [win] * 10, "mean_j": [0.1, 0.2],
+            "std_j": [0.01, 0.01], "clock_stable": True, "negative_marginal": []},
+            "energy_prefix": {"skipped": True}}],
+    }
+
+
+def test_audit_verify_passes_good_protocol_and_fails_each_gate():
+    good = _good_eval_doc()
+    assert audit.verify_one(good)["passed"]
+
+    cases = [
+        ("synthetic", {"synthetic_data": True}),
+        ("session", {"session_id": None}),
+        ("clock", {"clock_check": {"pinned": False, "spread_mhz": 180.0}}),
+        ("cot", {"co_tenancy": {"compute_process_count": 3}}),
+        ("repeats", {"protocol": {"repeats": 3}}),
+    ]
+    for name, patch in cases:
+        d = json.loads(json.dumps(good))
+        d.update(patch)
+        r = audit.verify_one(d)
+        assert not r["passed"], name
+    d = json.loads(json.dumps(good))
+    d["batch_rows"][0]["energy_cascade"]["windows"] = [{"duration_s": 1.0, "iters": 50}] * 10
+    r = audit.verify_one(d)
+    assert not r["passed"] and any("iters" in f for f in r["failures"])
+
+
+def test_audit_verify_e2e_requires_windows_and_ci():
+    good = {"dataset": "har", "arch": "harcnn", "synthetic_data": False, "session_id": "s",
+            "clock_check": {"pinned": True, "spread_mhz": 2.0},
+            "co_tenancy": {"compute_process_count": 0},
+            "protocol": {"repeats": 10, "latency_only": False}, "policies": [],
+            "rows": [{"batch": 1, "policy": "full", "mode": "compact", "j_per_sample": 0.01,
+                      "n_windows": 10, "j_ci95_halfwidth": 1e-4, "cv_pct": 3.0}]}
+    assert audit.verify_one(good)["passed"]
+    bad = json.loads(json.dumps(good))
+    bad["rows"][0]["n_windows"] = 3
+    bad["rows"][0]["j_ci95_halfwidth"] = None
+    r = audit.verify_one(bad)
+    assert not r["passed"] and len(r["failures"]) >= 2
+
+
+def test_audit_compare_groups_sessions_and_flags_spread(tmp_path):
+    def doc(v):
+        return {"dataset": "kws", "arch": "dscnn-s", "synthetic_data": False,
+                "session_id": "s", "clock_check": {"pinned": True}, "co_tenancy": {},
+                "protocol": {"repeats": 10},
+                "batch_rows": [{"batch": 1, "energy_cascade": {"skipped": False,
+                                                               "mean_j": [v, 2 * v]}}]}
+    p1, p2, p3 = tmp_path / "a.json", tmp_path / "b.json", tmp_path / "c.json"
+    p1.write_text(json.dumps(doc(0.10)))
+    p2.write_text(json.dumps(doc(0.105)))
+    p3.write_text(json.dumps(doc(0.30)))
+    out = audit.compare_docs([(p1, doc(0.10)), (p2, doc(0.105))], within_pct=10.0)
+    assert out["n_cells_compared"] == 1 and out["n_disagreeing"] == 0
+    out2 = audit.compare_docs([(p1, doc(0.10)), (p3, doc(0.30))], within_pct=10.0)
+    assert out2["n_disagreeing"] == 1
+
+def test_clock_check_does_not_call_an_idle_clock_pinned(monkeypatch):
+    # first call is the max-clock query; every later call is a sample
+    seq = iter(["210, 2100"] + ["210"] * 8)
+
+    def run2(cmd, timeout=15.0):
+        if "-q" in cmd:
+            return 0, "", ""
+        return 0, next(seq), ""
+
+    monkeypatch.setattr(measure, "_run", run2)
+    r = measure.clock_check(samples=8, interval_s=0.0)
+    assert r["available"] and r["spread_mhz"] == 0
+    assert r["pinned"] is False  # stable but idle: not evidence of a lock
+    assert "idle" in r["note"]
+
+    seq2 = iter(["1500, 2100"] + ["1500"] * 8)
+    monkeypatch.setattr(measure, "_run",
+                        lambda cmd, timeout=15.0: (0, "", "") if "-q" in cmd else (0, next(seq2), ""))
+    r2 = measure.clock_check(samples=8, interval_s=0.0)
+    assert r2["pinned"] is True and r2["floor_mhz"] == 1050
+
+def test_cli_evaluate_run_tag_namespaces_output(tmp_path):
+    r = _run(["src/evaluate.py", "--dataset", "kws", "--arch", "dscnn-s", "--synthetic",
+              "--skip-energy", "--run-tag", "B", "--lat-iters", "4"], tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    ev = json.loads((tmp_path / "eval_kws_dscnn-s_B.json").read_text())
+    assert ev["run_tag"] == "B" and ev["session_id"]
+
+
+def test_audit_compare_does_not_mix_training_seeds():
+    def doc(seed, v):
+        return {"dataset": "cifar10", "arch": "resnet14", "train_seed": seed,
+                "synthetic_data": False, "session_id": "s",
+                "clock_check": {"pinned": True}, "co_tenancy": {}, "protocol": {"repeats": 10},
+                "batch_rows": [{"batch": 1, "energy_cascade": {"skipped": False,
+                                                               "mean_j": [v]}}]}
+    out = audit.compare_docs([(Path("a.json"), doc(42, 0.10)),
+                              (Path("b.json"), doc(43, 0.30))], within_pct=10.0)
+    assert out["n_cells_compared"] == 0  # different checkpoints are not session repeats
+    out2 = audit.compare_docs([(Path("a.json"), doc(42, 0.10)),
+                               (Path("b.json"), doc(42, 0.105))], within_pct=10.0)
+    assert out2["n_cells_compared"] == 1 and out2["n_disagreeing"] == 0
