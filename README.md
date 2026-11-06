@@ -6,8 +6,8 @@ See `RUN_PLAN.md` for the exact GPU-box run order. See `AGENTS.md` for AI rules.
 Research statement and controlling verdicts (C1-C4, kill criteria):
 [percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md)
 
-Current framing (v2): [RESEARCH_STATEMENT.md](RESEARCH_STATEMENT.md) ·
-first RTX 3070 results: [RESULTS.md](RESULTS.md)
+Current framing (v3): [RESEARCH_STATEMENT.md](RESEARCH_STATEMENT.md) ·
+Phase 1/2 results (RTX 3070): [RESULTS.md](RESULTS.md)
 
 ## Repo layout (minimal)
 ```text
