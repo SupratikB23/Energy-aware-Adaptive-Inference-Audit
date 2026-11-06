@@ -1,11 +1,22 @@
 # RUN_PLAN — GPU BOX runbook (RTX 8GB, copy this repo + run top to bottom)
 
-> Do the steps in order. Each step gates the next (kill criteria at the end).
-> On THIS CPU-only machine only Step 0b applies. Everything else runs on the GPU box.
->
-> **STATUS (RTX 3070):** Steps 0–4 DONE, see [RESULTS.md](RESULTS.md).
-> **Next: PHASE 2 (Steps 5–9, ~60 min total), further down this file.**
 > Research framing: [RESEARCH_STATEMENT.md](RESEARCH_STATEMENT.md).
+> Completed results: [RESULTS.md](RESULTS.md).
+>
+> **STATUS.** Phase 1 (telemetry + C2/C3) and Phase 2 (locked-clock batch-1, CIFAR/HAR
+> end-to-end) are DONE. **Phase 3 (this file) is the pre-submission hardening pass** and
+> implements the five fixes in the ChatGPT feasibility review:
+>
+> | MD fix | Requirement | Where in Phase 3 |
+> |---|---|---|
+> | **A** | locked clocks, >=10 repeats, randomized order, close background GPU work, mean/SD/95% CI, repeat across sessions | Steps P3.1, P3.3, P3.4, P3.6 |
+> | **B** | >=3 training seeds for the main architectures | Step P3.2 |
+> | **C** | remaining experiments: locked-clock CIFAR e2e at b=1/8/16, more UCI-HAR b=64 repeats, reproducibility tests | Steps P3.4, P3.5, P3.6 |
+> | **D** | remove any controller-novelty claim | already enforced in AGENTS.md / RESEARCH_STATEMENT.md |
+> | **E** | update the research statement with the new evidence | RESEARCH_STATEMENT.md v3 |
+>
+> Every command writes to `results/p3/` and every output name carries the training seed
+> (`_s42`, `_s43`, `_s44`) and a `session_id`. Nothing from Phase 1/2 is overwritten.
 
 ## Step 0a. Setup (GPU box, once)
 ```bash
@@ -19,172 +30,213 @@ python -c "import torch;print(torch.__version__, torch.cuda.is_available(), torc
 nvidia-smi   # note GPU name, driver, power limit
 ```
 
-## Step 0b. Smoke (both machines)
+## Step 0b. Smoke + unit tests (both machines)
 ```bash
 python src/test_smoke.py
-# expect: ALL PASS (GPU checks SKIP on CPU box). If any FAIL here, fix before GPU work.
+python -m pytest src/test_units.py -q
+# expect: smoke "11 pass, 0 fail, 1 skip" and pytest all passed.
 ```
+If either fails here, fix it before touching the GPU.
 
-## Step 1. Pilot — can this box do the science? (10 min)
+## Step 0c. Pilot — can this box still do the science? (~12 min)
 ```bash
-python src/check_gpu.py --idle-seconds 60 --stress-seconds 30
-cat results/pilot.json
+python src/check_gpu.py --idle-seconds 60 --stress-seconds 30 --session p3-pilot
 ```
-- Expect: `cuda_kernel_check.ok: true`, `has_energy_counter: true` (all RTX 20/30/40/50 have it),
+- Expect: `cuda_kernel_check.ok: true`, `has_energy_counter: true`,
   `validation.passed: true`, `validation.basis: counter-vs-poll`, `residual <= 0.05`.
-- `basis: poll-only-unverifiable` = no hardware counter → no independent reference → FAIL by design.
-- Expect stress to move power/temp (e.g. idle ~20W → load 80W+).
-- **KILL-1: residual > 5%, no power samples, or poll-only → STOP. Do not benchmark. Report telemetry.**
+- `basis: poll-only-unverifiable` = no hardware counter -> no independent reference -> FAIL by design.
+- **KILL-1: residual > 5 %, no power samples, or poll-only -> STOP. Do not benchmark.**
 
-## Step 2. Train baselines (8GB-safe; AMP on, batch 64)
-```bash
-python src/train.py --dataset cifar10 --mode teacher --epochs 20 --batch-size 64
-python src/train.py --dataset cifar10 --mode exit_kd --teacher-ckpt results/cifar10_teacher_resnet18_e20_b64.pt --epochs 20 --batch-size 64
-# optional ablations:
-python src/train.py --dataset cifar10 --mode exit_ce --epochs 20 --batch-size 64
-python src/train.py --dataset cifar10 --mode student --epochs 20 --batch-size 64
-```
-- Expect: `results/*.pt + *.json` with per-head accuracy. Early heads < final head.
-- OOM (exit 2)? Lower `--batch-size 32`, keep `--grad-accum` default; never silently shrink — record it.
-
-## Step 3. Calibrate (LTT accuracy-risk, C4 energy-risk deferred)
-```bash
-python src/calibrate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10
-# (arch is read from the checkpoint; --arch only to override)
-cat results/ltt_cifar10_resnet14.json
-```
-- Expect: `selected` tau (most aggressive certified) + `deploy_check` on held-out split.
-- Risk = P(policy wrong AND full right) (bounded {0,1} loss → Hoeffding valid).
-- `selected: null` = nothing certifiable at this alpha — loosen alpha or accept negative result.
-- **alpha=0.01 is uncertifiable at n=5000 by construction**: Hoeffding needs
-  emp_risk <= alpha - sqrt(ln(1/delta)/(2n)) = 0.01 - 0.0152 < 0. Minimum certifiable alpha ~0.016.
-  Report this in the paper; then run the alpha sensitivity sweep (copy after each run, same output file):
+## Step 0d. Controlled-run hygiene (do this before EVERY locked block)
 ```powershell
-python src/calibrate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --alpha 0.05
-Copy-Item results/ltt_cifar10_resnet14.json results/ltt_cifar10_resnet14_a005.json
-python src/calibrate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --alpha 0.03
-Copy-Item results/ltt_cifar10_resnet14.json results/ltt_cifar10_resnet14_a003.json
-python src/calibrate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --alpha 0.02
-Copy-Item results/ltt_cifar10_resnet14.json results/ltt_cifar10_resnet14_a002.json
+# 1) Close browsers, Discord, game launchers, OBS, other Python/CUDA jobs.
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+# expect: no rows (or only your own shell). Record the output in your lab notes.
+# 2) Plug the laptop in / desktop on "Best performance".
+# 3) Lock the graphics clock (Administrator PowerShell):
+nvidia-smi -lgc 1500,1500
+nvidia-smi --query-gpu=clocks.gr,clocks.max.gr --format=csv
+# expect clocks.gr ~= 1500 and NOT ~210 (a stable idle clock is not a lock).
 ```
-- Expect: alpha 0.05 certifies tau ~0.85-0.9+; alpha 0.02 needs emp_risk <= ~0.5% (very high tau or null).
-  Thresholds grid (config `eval.thresholds`) goes up to 0.999 because head 0 is overconfident.
-
-## Step 4. Benchmark C2+C3 (the audit; use >=1000 energy iters)
-```bash
-python src/evaluate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --batches 1 8 16 32 64
-cat results/eval_cifar10_resnet14.json
+Then run every timed block in that **same Administrator shell**. At the very end:
+```powershell
+nvidia-smi -rgc
 ```
-- Runtime ≈ 60s idle + 120s warmup + 5 batches × 2 modes × 4 exits × 3 repeats × ≥3s ≈ 10-12 min.
-- Per batch row: `energy_prefix` / `energy_cascade` → `mean_j`, `std_j` (J per SAMPLE, idle-subtracted),
-  `adjacent_resolvable_3sigma`; `divergence_prefix` / `divergence_cascade`.
-  `cascade` = deployed path (earlier heads + host exit decisions) and is what policies are costed with.
-- Expect: `synthetic_data: false` (if true, numbers are plumbing only), `flops_per_exit` increasing.
-- **KILL-2: `adjacent_resolvable_3sigma` has False at batch 1 → per-exit policy unmeasurable. Pivot to C1+C2.**
-- **KILL-3: `significant_disagreements_3sigma` empty for every batch → drop FLOPs-are-wrong from abstract.**
-- **KILL-4: marginal-utility never beats confidence at matched acc → report negative C3 (still publishable).**
+If `-lgc` is refused even as Administrator, stop and report the limitation; do not
+pretend an unlocked run is a controlled run. `--require-pinned-clock` exists to make
+that mistake impossible.
 
 ---
 
-# PHASE 2 — strengthen the workshop paper (run in this order, ~60 min)
+# PHASE 3 — pre-submission hardening (run in this order, ~4–5 h)
 
-All commands are one line each: copy-paste them as-is into PowerShell.
-
-Before you start (3 min):
+Set one session id per block so the audit can group the runs:
 ```powershell
-git pull
+$env:PERCOM_SESSION = "p3-locked1500"
+```
+
+## Step P3.1. Sanity: one fast CPU-only command on the GPU box (1 min)
+```powershell
 python src/test_smoke.py
 python -m pytest src/test_units.py -q
-nvidia-smi
 ```
-- Expect smoke `11 pass, 0 fail` and pytest all passed.
-- Close browsers / Discord / game launchers. Keep the PC idle, plugged in, power mode "Best performance".
-- Every step writes to its OWN folder under `results/runs/`, so nothing overwrites anything.
+Both must pass on the GPU box too before training.
 
-## Step 5. Policy re-analysis with a pooled, fair baseline (CIFAR, ~2 min, no energy run)
-Re-prices every policy with the run1+run2 **pooled** batch-1 cost table. Adds the **per-head
-threshold baseline** (the fair comparison for marginal-utility) and a **FLOP-cost sensitivity**
-(does MU only win because of the measured cost?).
-```powershell
-python src/evaluate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --skip-energy --cost-json results/runs/eval_run1/eval_cifar10_resnet14.json results/runs/eval_run2/eval_cifar10_resnet14.json --results results/runs/policy_pooled
-```
-Look at the `[KILL-4 measured]` / `[KILL-4 flops]` lines at the end:
-- `mu_vs_perhead` ≈ 0 wins → MU is just per-head thresholds (expected; report it).
-- `mu_vs_confidence` wins under **measured** but not under **flops** → the measured cost term changed
-  the decision (the C3 claim). Wins under both → the win comes from per-head flexibility, not measurement.
+## Step P3.2. Train 3 seeds (MD fix B, ~85 min)
 
-## Step 6. End-to-end policy energy on CIFAR (THE new experiment, ~15 min)
-Runs the real early-exit runtime on 2500 real deploy images at every batch size, and compares
-the measured J/sample with the per-exit **table** prediction and the **FLOP** prediction.
-Compaction (drop exited samples) vs batch-wait vs just batching the full model.
+CIFAR-10 (teacher ResNet-18 + exit-aware KD ResNet-14), 3 seeds:
 ```powershell
-python src/e2e_policy.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --batches 1 8 16 32 64 --taus 0.9 0.97 0.99 --perhead-from results/runs/policy_pooled/eval_cifar10_resnet14.json --eval-json results/runs/eval_run1/eval_cifar10_resnet14.json results/runs/eval_run2/eval_cifar10_resnet14.json --results results/runs/e2e_cifar
+foreach ($s in 42,43,44) {
+  python src/train.py --dataset cifar10 --mode teacher --epochs 20 --batch-size 64 --seed $s --results results/p3
+  python src/train.py --dataset cifar10 --mode exit_kd --arch resnet14 --teacher-ckpt "results/p3/cifar10_teacher_resnet18_e20_b64_s$s.pt" --epochs 20 --batch-size 64 --seed $s --results results/p3
+}
 ```
-- Console line per cell: `E=… mJ save=…% tableErr=…% flopErr=…%`.
-- `[e2e] WARNING runtime != offline` must NOT appear (the runtime must reproduce the offline policy).
+UCI-HAR (teacher ResNet-18 + exit-aware KD HAR-CNN), 3 seeds (~5 min total):
+```powershell
+foreach ($s in 42,43,44) {
+  python src/train.py --dataset har --mode teacher --arch resnet18 --epochs 20 --batch-size 64 --seed $s --results results/p3
+  python src/train.py --dataset har --mode exit_kd --arch harcnn --teacher-ckpt "results/p3/har_teacher_resnet18_e20_b64_s$s.pt" --epochs 20 --batch-size 64 --seed $s --results results/p3
+}
+```
+- Expect `results/p3/*_s42.pt`, `*_s43.pt`, `*_s44.pt`, each with a matching `.json`.
+- Expect CIFAR final head ~92 %, HAR final head ~92–95 %.
+- OOM (exit 2)? Lower `--batch-size 32` for **all** seeds and record the change. Never shrink silently.
+- Check the seed spread before spending GPU time on measurement:
+```powershell
+python -c "import json,glob; [print(sorted((j['seed'], j['history'][-1]['acc']) for j in (json.load(open(p)) for p in glob.glob('results/p3/cifar10_exit_kd_*_s*.json'))))]"
+```
+If the final-head seed spread is > 1.5 accuracy points, report it; the energy story may still hold but the accuracy claim must be softened.
 
-## Step 7. Pervasive track on REAL UCI-HAR (~25 min)
-The first command auto-downloads UCI-HAR (58 MB, SHA-256 pinned) into `data/`.
+## Step P3.3. Calibrate each seed (C4, ~1 min)
 ```powershell
-python src/train.py --dataset har --mode teacher --arch resnet18 --epochs 20
-python src/train.py --dataset har --mode exit_kd --arch harcnn --teacher-ckpt results/har_teacher_resnet18_e20_b64.pt --epochs 20
-python src/train.py --dataset har --mode exit_ce --arch harcnn --epochs 20
-python src/calibrate.py --ckpt results/har_exit_kd_harcnn_e20_b64.pt --dataset har --alpha 0.05 --results results/runs/har_ltt_a005
-python src/calibrate.py --ckpt results/har_exit_kd_harcnn_e20_b64.pt --dataset har --alpha 0.03 --results results/runs/har_ltt_a003
-python src/evaluate.py --ckpt results/har_exit_kd_harcnn_e20_b64.pt --dataset har --batches 1 8 16 32 64 --results results/runs/har_eval
-python src/e2e_policy.py --ckpt results/har_exit_kd_harcnn_e20_b64.pt --dataset har --batches 1 8 16 32 64 --taus 0.9 0.97 0.99 --perhead-from results/runs/har_eval/eval_har_harcnn.json --eval-json results/runs/har_eval/eval_har_harcnn.json --results results/runs/e2e_har
+foreach ($s in 42,43,44) {
+  python src/calibrate.py --ckpt "results/p3/cifar10_exit_kd_resnet14_e20_b64_s$s.pt" --dataset cifar10 --alpha 0.02 --session "p3-cal-cifar-s$s" --results results/p3
+  python src/calibrate.py --ckpt "results/p3/har_exit_kd_harcnn_e20_b64_s$s.pt" --dataset har --alpha 0.05 --session "p3-cal-har-$s" --results results/p3
+}
 ```
-- Expect: HAR final head ≈ 92–95 % (CPU check here: 93.0 %). `synthetic_data: false` everywhere.
-- HAR calibration n = 1473, so the smallest certifiable α ≈ 0.03 (Hoeffding). Don't bother with α ≤ 0.02.
-- The HAR model is 97 k params / 3.9 MFLOPs: FLOPs predict ~91 % saving at exit 0. The measured
-  number is the pervasive-scale C2 result.
+- Expect `ltt_*_s42.json`, `_s43.json`, `_s44.json`.
+- `selected: null` at strict alpha is a valid result; record it as-is.
 
-## Step 8. Is batch-1 noise DVFS? Clock-locked vs unlocked (CIFAR, ~20 min)
-First an unlocked run with 10 repeats (normal PowerShell):
+## Step P3.4. CIFAR per-exit energy at 10 repeats, locked clocks (MD fix A, ~65 min)
 ```powershell
-python src/evaluate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --batches 1 8 --repeats 10 --results results/runs/eval_b1b8_unlocked_r10
+# full regime map, seed 42 only (hardware measurement need not repeat for every seed)
+python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 32 64 --repeats 10 --require-pinned-clock --session p3-eval-cifar-s42-A --run-tag A --results results/p3
+# seed robustness: the policy cost table (b=1) and the large-batch regime (b=64)
+foreach ($s in 43,44) {
+  python src/evaluate.py --ckpt "results/p3/cifar10_exit_kd_resnet14_e20_b64_s$s.pt" --dataset cifar10 --batches 1 64 --repeats 10 --require-pinned-clock --session "p3-eval-cifar-s$s" --run-tag A --results results/p3
+}
+# cross-session repeat of the headline cells with the SAME seed-42 checkpoint (~14 min)
+python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --repeats 10 --require-pinned-clock --session p3-eval-cifar-s42-B --run-tag B --results results/p3
 ```
-Then, in **PowerShell as Administrator**: lock the graphics clock, run the same thing, and UNLOCK:
+- Each row must show `clock ... 1500-1500 MHz stable=True`, `cv%` in the single digits,
+  and `repeats: 10`, `randomized_order: true` in the JSON.
+- `--require-pinned-clock` exits 2 if the lock is not active. That is intentional: fix the lock, rerun.
+- `--run-tag` keeps session A and session B from overwriting each other; `audit compare` then tests
+  the same checkpoint across the two sessions (it groups by `train_seed`, so seeds 43/44 are not
+  mistaken for session repeats).
+- **KILL-2** still applies: if batch-1 adjacent exits are not resolvable at 10 repeats, report it as a C1 limit rather than forcing a per-exit policy claim.
+
+## Step P3.5. CIFAR end-to-end at b = 1, 8, 16, locked clocks (MD fix C, ~50 min)
+Two independent sessions, same checkpoint:
 ```powershell
-nvidia-smi -lgc 1500,1500
-python src/evaluate.py --ckpt results/cifar10_exit_kd_resnet14_e20_b64.pt --dataset cifar10 --batches 1 8 --repeats 10 --results results/runs/eval_b1b8_locked1500
+python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --session p3-e2e-cifar-A --run-tag A --results results/p3
+python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --session p3-e2e-cifar-B --run-tag B --results results/p3
+```
+- Expect `[e2e] WARNING runtime != offline` to be **absent**; if present, stop — the runtime is not the measured policy.
+- Every row must have `j_ci95_halfwidth`, `n_windows: 10`, `cv_pct`, `min_window_s >= 3`, `clock_mhz` ~1500.
+- This is the run that answers "does early exit still save energy at b = 16 under locked clocks?"
+  Phase 2 (unlocked) said the saving disappears by b = 16; this run is the controlled test.
+
+## Step P3.6. UCI-HAR b = 64 repeat sessions (MD fix C, ~25 min)
+Two independent locked sessions of the same cell, to test the Phase 2 "HAR b=64 is
+unreproducible" gap:
+```powershell
+python src/evaluate.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 64 --repeats 10 --require-pinned-clock --session p3-eval-har-A --run-tag A --results results/p3
+python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --session p3-har-b64-A --run-tag A --results results/p3
+python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --session p3-har-b64-B --run-tag B --results results/p3
+```
+- The two e2e runs write `..._A.json` and `..._B.json`, so neither overwrites the other.
+- The whole point is that the two sessions must land within 10 % of each other (`audit compare`).
+  If they do not, that is a C1 finding, and the Phase 2 HAR numbers must be reported with that error bar.
+
+## Step P3.7. Audit the runs (MD fix A/C, 1 min)
+```powershell
+# hard gates: >=10 windows, >=1000 iters, >=3 s, pinned clock, no co-tenant, real data, session id
+python src/audit.py verify --results results/p3
+# cross-session agreement: the same cell measured in >=2 sessions must agree within 10 %
+python src/audit.py compare --results results/p3 --within 10
+```
+- `audit_verify.json` lists every failure per file. **Do not put a file in the paper if it says FAIL.**
+- `audit_compare.json` lists every repeated cell; `agrees: true` is the reproducibility claim.
+- A single-session cell is reported but not counted as agreement. That is expected.
+
+## Step P3.8. Copy back and unlock
+```powershell
 nvidia-smi -rgc
+# copy results/p3/ + the two audit JSONs to the analysis machine
 ```
-- Compare `clock_stable`, `cv%` and `resolvable` between the two runs (printed per batch).
-  If exits 0↔1 become resolvable when locked → C1 finding: "batch-1 per-exit energy needs locked clocks".
-- If `nvidia-smi -lgc` is refused: skip the locked run, keep the unlocked r10 run, note the limitation.
-- **Always run `nvidia-smi -rgc` afterwards**, even if the run fails.
+Never commit `data/`, `results/`, `*.pt`, `*.csv`.
 
-## Step 9. Copy back
-Copy the whole `results/runs/` folder plus the new `results/har_*.json` to the analysis machine.
-Never commit `data/`, `results/`, `*.pt`.
+---
 
-### Phase 2 decision table
+## Time budget (RTX 3070, measured Phase 1/2 speeds)
+
+| Block | What | Estimate |
+|---|---|---|
+| P3.2 | 3 seeds x (CIFAR teacher + exit_kd) | 80–90 min |
+| P3.2 | 3 seeds x (HAR teacher + exit_kd) | 5–10 min |
+| P3.3 | 6 calibrations | 2 min |
+| P3.4 | CIFAR eval: full sweep A + 2 x 2-batch + headline repeat B | 60–70 min |
+| P3.5 | CIFAR e2e b=1/8/16, 10 repeats, sessions A + B | 45–50 min |
+| P3.6 | HAR eval b=1/64 + 2 x e2e b=64 | 25–30 min |
+| P3.7 | audit | 1 min |
+| **Total** | first clean pass | **~4–5 h** |
+| worst case | one retry per block + OOM/slow disk | **~6–7 h** |
+
+Per-run detail (why the numbers are what they are):
+- `evaluate` full sweep: 60 s idle + 120 s warmup + 5 batches x 2 modes x 4 exits x 10 windows x >=3 s = ~20–22 min.
+- `evaluate` 2-batch run: ~8–10 min; the 3-batch headline repeat B: ~12–14 min.
+- `e2e_policy` 3-batch run: ~13 cells/batch x 3 batches x 10 windows x >=3 s + warmup = ~22–25 min.
+- `e2e_policy` HAR b=64: ~13 cells x 10 x >=3 s + warmup = ~8–10 min per session.
+- CIFAR training: 778 s teacher + 830 s exit_kd per seed (measured), so 3 seeds ~80 min.
+
+If you also want the **full** Phase 2 matrix re-run at 10 repeats for both workloads
+(all e2e batches 1/8/16/32/64, both modes, all seeds), budget **7–9 h**.
+
+## Phase 3 decision table
 | Check | Where | Meaning |
 |---|---|---|
-| Runtime reproduces offline policy | Step 6/7: no `WARNING runtime != offline` | If it appears, stop: runtime numbers are invalid |
-| Table prediction error | `tableErr` in e2e output | Large error at any batch = additive per-exit tables mis-price policies (C3) |
-| Early exit vs full model at the same batch | `save=` at batch ≥16 | ≤ 0 = batching erases early-exit savings (Cluster F, measured) |
-| MU vs per-head baseline | `[KILL-4 …] mu_vs_perhead` | Expected ≈ tie: MU = per-head thresholds. Report as equivalence |
-| Locked clocks fix batch-1 resolvability | Step 8 | If not: batch-1 per-exit energy is intrinsically unresolvable on this GPU |
+| Telemetry still valid | P3.0 `check_gpu.py` | If KILL-1 fires, stop: no policy runs on bad telemetry |
+| Clock actually locked | P3.0d + every JSON `clock_check.pinned` | `--require-pinned-clock` refuses to run otherwise |
+| No co-tenant | `co_tenancy.compute_process_count <= 1` | >1 means another GPU process is shifting idle power |
+| Seed robustness | P3.2 JSONs, 3 seeds | Final-head spread > 1.5 pts => soften accuracy claims |
+| Per-exit resolvable at b=1 | `adjacent_resolvable_3sigma` | If false at 10 locked repeats, it is a C1 limit, not a bug |
+| Additive table error | `e2e` `tableErr` | Large error at any batch = per-exit tables mis-price policies (C3) |
+| Early exit vs full at same batch | `e2e` `save=` | <=0 at b>=16 = batching erases savings (the central C2 result) |
+| Runtime == offline policy | no `WARNING runtime != offline` | If it appears, the e2e numbers are invalid |
+| HAR b=64 reproducible | P3.6 two sessions + `audit compare` | >10 % disagreement is a C1 finding to report |
+| Every file publishable | `audit verify` all PASS | Any FAIL file is excluded from the paper |
 
 ## 8GB cheat sheet
 - Train batch 64; eval sweep `--batches 1 8 16 32 64`; `--num-workers 0` on Windows.
-- Every run logs VRAM (`vram` in JSON) — allocation shifts idle power, keep it constant across comparisons.
-- `evaluate.py` does a settled 60s idle baseline, then a 120s GPU warmup, then round-robin repeated windows.
-  Don't pass `--warmup-seconds 0` / `--idle-seconds` < 60 for real numbers. Close browsers/miners; record `process_count`.
+- Every run logs VRAM (`vram` in JSON); allocation shifts idle power, keep it constant across comparisons.
+- `evaluate.py` does a settled 60 s idle baseline, then a 120 s GPU warmup, then randomized repeated windows.
+- Do not pass `--warmup-seconds 0` or `--idle-seconds < 60` for real numbers.
+- `--repeats < 10` prints a warning and is exploratory only; `audit verify` will fail it.
 
 ## Troubleshooting
 | Symptom | Fix |
 |---|---|
-| `pynvml not installed` | `pip install -r requirements.txt` on GPU box (optional on CPU box) |
+| `pynvml not installed` | `pip install -r requirements.txt` on the GPU box |
 | `nvmlInit() failed` | driver/CUDA mismatch; reinstall driver-matched torch; retry `nvidia-smi` |
-| `has_energy_counter: false` | Poll-only cannot be self-validated → KILL-1. Needs an external meter (should not happen on RTX 20+) |
-| `no kernel image is available` / kernel check fails | torch wheel lacks your GPU arch; RTX 50 → reinstall torch from the cu128 index |
-| `CIFAR10 load/download failed` | box has no internet: copy `data/cifar-10-batches-py/` over; never use `--synthetic` for real runs |
-| `C2cModeInfoV` errors (old MoLab bug) | gone — we never call it; if Zeus reintroduces it, don't shim energy paths |
-| OOM exit 2 | `--batch-size 32`, close other procs, keep AMP on |
+| `has_energy_counter: false` | Poll-only cannot be self-validated -> KILL-1. Needs an external meter |
+| `--require-pinned-clock` exits 2 | Run `nvidia-smi -lgc 1500,1500` in an Administrator shell first; confirm `clocks.gr ~= 1500`, not ~210 |
+| Clock reads ~210 after `-lgc` | Lock did not take (driver/permission). Do not disable the gate; fix the lock |
+| `--require-pinned-clock` passes but clocks drift later | Re-run; `clock_check` is a start-of-run snapshot, per-window clocks are in every JSON |
+| `no kernel image is available` | torch wheel lacks your GPU arch; RTX 50 -> reinstall from the cu128 index |
+| CIFAR download fails | copy `data/cifar-10-batches-py/` over; never use `--synthetic` for real runs |
+| UCI-HAR `sha256 mismatch` | delete `data/uci_har.zip` and rerun; if it persists, the download is corrupted/tampered |
+| OOM exit 2 | `--batch-size 32` for all seeds, close other processes, keep AMP on, record the change |
 | `selected: null` in LTT | expected at strict alpha; report honestly, try alpha 0.02/0.05 as sensitivity |
-| `UCI-HAR ... sha256 mismatch` | delete `data/uci_har.zip` and rerun; if it persists, the download is corrupted/tampered |
-| `UCI-HAR load/download failed` | no internet: get the zip from archive.ics.uci.edu (dataset 240) and save it as `data/uci_har.zip` |
-| `nvidia-smi -lgc` refused | needs Administrator PowerShell; if still refused, skip the Step 8 locked run (limitation) |
+| `audit verify` says `n_windows < 10` | you ran with `--repeats < 10`; rerun at 10 for publishable numbers |
+| `audit compare` disagreement > 10 % | treat as a C1 result: report the between-session error bar, do not average it away |
