@@ -85,7 +85,12 @@ $LOCK = [int]([math]::Floor(0.70 * $max / 15) * 15)
 "max=$max  LOCK=$LOCK"        # RTX 3070 Phase 2 used 1500; write the new value in your lab notes
 nvidia-smi -lgc "$LOCK,$LOCK"
 nvidia-smi --query-gpu=clocks.gr,clocks.max.gr --format=csv
-# expect clocks.gr ~= $LOCK and NOT ~210 (a stable idle clock is not a lock).
+# At IDLE the clock may still read low (0-540 MHz on RTX 50) even with the lock applied: the lock
+# caps the clock, it does not force it up. It is verified UNDER LOAD, which evaluate/e2e/check_gpu
+# now do themselves (a 2 s matmul warm-up, then 8 samples; `clock_check.sampled_under_load: true`).
+# Manual check under load (expect ~$LOCK, spread in single digits, pinned True):
+python -c "import json; from src.measure import clock_check; c=clock_check(warm_gpu=True); print(c['pinned'], c['samples_mhz'], c['sampled_under_load'])"
+# The gate proves the clock is steady, not its value: confirm the samples are ~$LOCK, not ~max boost.
 ```
 Do **training (P3.2) and calibration (P3.3) and the unlocked contrast (P3.3b) with the clock
 UNLOCKED**; lock only at the start of P3.4. Run every locked block in that **same
@@ -101,7 +106,7 @@ that mistake impossible.
 
 ---
 
-# PHASE 3 — pre-submission hardening (run in this order, ~4–5 h)
+# PHASE 3 — pre-submission hardening (run in this order, ~5.5–6.5 h)
 
 Set one session id per block so the audit can group the runs:
 ```powershell
@@ -196,15 +201,16 @@ python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.
   Phase 2 (unlocked) said the saving disappears by b = 16; this run is the controlled test.
 
 ### Step P3.5b. CIFAR end-to-end at the large batches b = 32, 64 (~17 min)
-The statement claims the saving reverses to a cost at b = 64. Phase 3 must measure that locked,
-not inherit it from Phase 2. One session, a different tag so it cannot overwrite session A:
+Phase 2 says the reversal is at b = 16 (most policies cost more; best case saves 3 %), and b = 64
+only partially recovers (3-15 % saved, still far below b = 1/8). Phase 3 must measure that shape
+locked, not inherit it from Phase 2. One session, a different tag so it cannot overwrite session A:
 ```powershell
 python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 32 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --session p3-e2e-cifar-hi --run-tag Ahi --results results/p3
 ```
 - Writes `e2e_cifar10_resnet14_s42_Ahi.json`; single-session, so `audit compare` reports but does
   not count it as agreement. Same gates apply (`audit verify`).
 
-## Step P3.6. UCI-HAR b = 64 repeat sessions (MD fix C, ~25 min)
+## Step P3.6. UCI-HAR b = 64 repeat sessions (MD fix C, ~45 min)
 Two independent locked sessions of the same cell, to test the Phase 2 "HAR b=64 is
 unreproducible" gap:
 ```powershell
@@ -258,7 +264,7 @@ Never commit `data/`, `results/`, `*.pt`, `*.csv`.
 | P3.4 | CIFAR eval: full sweep A + 2 x 2-batch + headline repeat B | 60–70 min |
 | P3.5 | CIFAR e2e b=1/8/16, 10 repeats, sessions A + B | 45–50 min |
 | P3.5b | CIFAR e2e b=32/64, one session | 17 min |
-| P3.6 | HAR eval b=1/8/16/32/64 + 2 x e2e b=64 | 30–35 min |
+| P3.6 | HAR eval b=1/8/16/32/64 + 2 x e2e b=64 | 40–45 min |
 | P3.6b | HAR e2e b=1/8/16/32, one session | 30 min |
 | P3.7 | audit | 1 min |
 | **Total** | first clean pass (incl. 12 min pilot) | **~5.5–6.5 h** |

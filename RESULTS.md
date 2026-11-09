@@ -36,7 +36,7 @@ seeded randomized order, Student-t 95 % CIs, pinned-clock evidence, co-tenancy s
 | **KILL-4** marginal-utility beats confidence at matched accuracy (CIFAR) | median 9.9 % (locked clocks) to 20.5 % (unlocked) cheaper, vs ~2 % under FLOP pricing (§10.5) | ✅ PASS, modest |
 | LTT accuracy-risk guarantee holds on held-out split | CIFAR α = 0.02 / 0.03 / 0.05 and HAR α = 0.03 / 0.05; α = 0.01 uncertifiable | ✅ |
 | **Phase 2:** locked clocks restore batch-1 measurability | batch-1 cascade: 0/3 → 3/3 adjacent exits resolvable; identical-workload mismatch 16–54 % → 7 % | ✅ (§10.2) |
-| **Phase 2:** early exit saves energy end to end, **CIFAR ResNet-14** | **Yes, at small batch only.** 18–67 % at b = 1, 18–49 % at b = 8, then it reverses: −29 … +3 % at b = 16, +3 … +15 % at b = 64 | ✅ (§11.1) |
+| **Phase 2:** early exit saves energy end to end, **CIFAR ResNet-14** | **Yes, at small batch only.** Saves 18–67 % at b = 1 and 18–49 % at b = 8; at b = 16 it mostly reverses (costs up to 29 %, best case saves 3 %); b = 64 recovers only to 3–15 % saved, far below b = 1 | ✅ (§11.1) |
 | **Phase 2:** early exit saves energy end to end, **HAR CNN (97 k params)** | **No, never.** Costs 6–241 % more than the full model at every batch size, under both default and locked clocks | ❌ key finding (§11.2) |
 | **Phase 2:** the additive per-exit table predicts real policy energy | **No.** It under-predicts energy by 3–39 % (CIFAR) and 53–87 % (HAR); i.e. it promises savings that do not appear | ❌ key finding (§11.3) |
 | **Phase 2:** FLOPs predict end-to-end policy energy | CIFAR −45 … +84 %, HAR −71 … −94 % | ❌ key finding (§11.3) |

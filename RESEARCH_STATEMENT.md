@@ -4,6 +4,11 @@ Controlling verdict and full literature matrix:
 [percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md).
 Measured results: [RESULTS.md](RESULTS.md). Run order: [RUN_PLAN.md](RUN_PLAN.md).
 
+> **Phase 3 status (Nov 9, 2026).** P3.1-P3.3b are reported complete on the RTX 5060 (3 training
+> seeds, calibration, unlocked b=1/8 contrast). The locked core P3.4-P3.7 is still pending, so every
+> Phase 2 number below is preliminary and the locked/10-randomized-window protocol is a target, not
+> yet a published result.
+
 ## Working title
 **Priced by the Table, Paid at the Meter: a measured-energy audit of early-exit inference on a commodity GPU**
 
@@ -13,7 +18,7 @@ early-exit policy with an additive table, E_policy ~= sum_h P(exit at h) * cost(
 is FLOPs or a per-exit energy profile, and then optimise decision rules against that price.
 
 We audit the price itself on a commodity GPU, with telemetry we validate first
-(hardware counter vs 142 Hz polling, 0.16 % residual). We then measure early-exit energy per
+(hardware counter vs 142 Hz polling, 0.16 % residual). Phase 3 measures early-exit energy per
 exit, per policy and end to end, across batch sizes, under locked clocks and with 10 randomized
 windows per cell. We cover a CIFAR-10 ResNet and a pervasive-scale HAR CNN (97 k params,
 3.9 MFLOPs, real UCI-HAR smartphone data).
@@ -32,10 +37,10 @@ decision rule is not the contribution.
 ## Research questions
 | RQ | Question | Evidence so far | Pending run |
 |---|---|---|---|
-| RQ1 (C1) | Can per-exit GPU energy be measured, and in which regime? | Counter vs poll 0.16 %. Unlocked batch-1: clocks 855-1935 MHz, CV 3-41 %, adjacent exits 0/3 resolvable. **Locked 1500 MHz: clocks 1500-1500, CV 3.9-10.7 %, adjacent exits 3/3 resolvable**, identical-workload mismatch 16-54 % -> 7 %. | Phase 3: 10 repeats + randomized order + 3 sessions, CIFAR and HAR |
+| RQ1 (C1) | Can per-exit GPU energy be measured, and in which regime? | Counter vs poll 0.16 %. Unlocked batch-1: clocks 855-1935 MHz, CV 3-41 %, adjacent exits 0/3 resolvable. **Locked 1500 MHz: clocks 1500-1500, CV 3.9-10.7 %, adjacent exits 3/3 resolvable**, identical-workload mismatch 16-54 % -> 7 %. | Phase 3: 10 repeats + randomized order + 2 independent sessions per headline cell, CIFAR and HAR |
 | RQ2 (C2) | When do FLOPs mispredict early-exit savings? | Order preserved (KILL-3 fired), but the *size* is off: CIFAR -45 to +84 %, HAR -71 to -94 %. Full model at b=64 is cheaper per sample than the earliest exit at b=1. | Locked-clock CIFAR e2e b=1/8/16 (Phase 3) |
-| RQ3 (C2/C3) | Does the additive table predict what a real early-exit runtime costs, and does batching erase the savings? | **No.** Table under-predicts by 3-39 % (CIFAR) and 53-87 % (HAR). CIFAR early exit saves 18-67 % at b=1 and 18-49 % at b=8, then reverses: -29 to +3 % at b=16, +3 to +15 % at b=64. HAR costs 6-241 % *more* than full at every batch. Compaction beats batch-wait in 45/48 cells. | Phase 3: locked-clock CIFAR e2e b=1/8/16; two HAR b=64 sessions |
-| RQ4 (C3) | Does a measured cost term change policy decisions? | Marginal-utility is algebraically per-head confidence thresholds (proved in `test_units.py`). Against per-head it ties (11/12, median 15.1 % under measured cost; 1.8 % under FLOP cost). The measured cost term does not create a new controller; it changes the *price* of the operating points. | 3 seeds x pooled cost tables (Phase 3) |
+| RQ3 (C2/C3) | Does the additive table predict what a real early-exit runtime costs, and does batching erase the savings? | **No.** Table under-predicts by 3-39 % (CIFAR) and 53-87 % (HAR). CIFAR early exit saves 18-67 % at b=1 and 18-49 % at b=8; at b=16 it mostly reverses (costs up to 29 %, best case saves 3 %), and b=64 recovers only to 3-15 % saved. HAR costs 6-241 % *more* than full at every batch. Compaction beats batch-wait in 45/48 cells. | Phase 3: locked-clock CIFAR e2e b=1/8/16; two HAR b=64 sessions |
+| RQ4 (C3) | Does a measured cost term change policy decisions? | Marginal-utility is algebraically per-head confidence thresholds (proved in `test_units.py`). Against per-head it ties (11/12, median 15.1 % under measured cost; 1.8 % under FLOP cost). The measured cost term does not create a new controller; it changes the *price* of the operating points. | 3 seeds; b=1/64 cost table for seeds 43/44 (Phase 3) |
 | RQ5 (C4-lite) | Are certified operating points meaningful energetically? | LTT certifies tau=0.99 at alpha=0.02 (68 % exit early, -0.3 pts). alpha=0.01 is uncertifiable at n=5000 by Hoeffding. | Price certified tau end to end (Phase 3 `--taus 0.9 0.97 0.99`) |
 
 ## Contributions (what we claim)
