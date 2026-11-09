@@ -38,10 +38,10 @@ decision rule is not the contribution.
 | RQ | Question | Evidence so far | Pending run |
 |---|---|---|---|
 | RQ1 (C1) | Can per-exit GPU energy be measured, and in which regime? | Counter vs poll 0.16 %. Unlocked batch-1: clocks 855-1935 MHz, CV 3-41 %, adjacent exits 0/3 resolvable. **Locked 1500 MHz: clocks 1500-1500, CV 3.9-10.7 %, adjacent exits 3/3 resolvable**, identical-workload mismatch 16-54 % -> 7 %. | Phase 3: 10 repeats + randomized order + 2 independent sessions per headline cell, CIFAR and HAR |
-| RQ2 (C2) | When do FLOPs mispredict early-exit savings? | Order preserved (KILL-3 fired), but the *size* is off: CIFAR -45 to +84 %, HAR -71 to -94 %. Full model at b=64 is cheaper per sample than the earliest exit at b=1. | Locked-clock CIFAR e2e b=1/8/16 (Phase 3) |
-| RQ3 (C2/C3) | Does the additive table predict what a real early-exit runtime costs, and does batching erase the savings? | **No.** Table under-predicts by 3-39 % (CIFAR) and 53-87 % (HAR). CIFAR early exit saves 18-67 % at b=1 and 18-49 % at b=8; at b=16 it mostly reverses (costs up to 29 %, best case saves 3 %), and b=64 recovers only to 3-15 % saved. HAR costs 6-241 % *more* than full at every batch. Compaction beats batch-wait in 45/48 cells. | Phase 3: locked-clock CIFAR e2e b=1/8/16; two HAR b=64 sessions |
+| RQ2 (C2) | When do FLOPs mispredict early-exit savings? | Order preserved (KILL-3 fired), but the *size* is off: CIFAR -45 to +84 %, HAR -71 to -94 %. Full model at b=64 is cheaper per sample than the earliest exit at b=1. | Locked-clock CIFAR e2e b=1/8/16/64 (Phase 3, laptop-lite) |
+| RQ3 (C2/C3) | Does the additive table predict what a real early-exit runtime costs, and does batching erase the savings? | **No.** Table under-predicts by 3-39 % (CIFAR) and 53-87 % (HAR). CIFAR early exit saves 18-67 % at b=1 and 18-49 % at b=8; at b=16 it mostly reverses (costs up to 29 %, best case saves 3 %), and b=64 recovers only to 3-15 % saved. HAR costs 6-241 % *more* than full at every batch. Compaction beats batch-wait in 45/48 cells. | Phase 3 (laptop-lite): locked CIFAR e2e b=1/8/16/64; HAR e2e b=1 and 64 (b=64 in two sessions) |
 | RQ4 (C3) | Does a measured cost term change policy decisions? | Marginal-utility is algebraically per-head confidence thresholds (proved in `test_units.py`). Against per-head it ties (11/12, median 15.1 % under measured cost; 1.8 % under FLOP cost). The measured cost term does not create a new controller; it changes the *price* of the operating points. | 3 seeds; b=1/64 cost table for seeds 43/44 (Phase 3) |
-| RQ5 (C4-lite) | Are certified operating points meaningful energetically? | LTT certifies tau=0.99 at alpha=0.02 (68 % exit early, -0.3 pts). alpha=0.01 is uncertifiable at n=5000 by Hoeffding. | Price certified tau end to end (Phase 3 `--taus 0.9 0.97 0.99`) |
+| RQ5 (C4-lite) | Are certified operating points meaningful energetically? | LTT certifies tau=0.99 at alpha=0.02 (68 % exit early, -0.3 pts). alpha=0.01 is uncertifiable at n=5000 by Hoeffding. | Price certified tau end to end (Phase 3 `--taus 0.97 0.99`) |
 
 ## Contributions (what we claim)
 1. **C1: a validated per-exit energy protocol**, and the regime where it fails. The NVML counter is
@@ -108,5 +108,7 @@ decision rule is not the contribution.
   seeded randomized order, Student-t CIs and cross-session comparison. Phase 2 numbers are
   therefore preliminary and must be reported as such if the Phase 3 runs are not finished.
 - One training seed in Phase 1/2. Phase 3 trains 3 seeds for CIFAR and HAR and reports the seed
-  spread; hardware measurements are repeated for seed 42 and spot-checked at b=1/64 for seeds 43/44.
+  spread; hardware measurements are repeated for seed 42 and spot-checked at b=1 for seeds 43/44. Because the measurement GPU is a power-limited laptop part, the
+  locked-clock set is reduced to CIFAR b=1/8/16/64 and HAR b=1/64 (optional extensions cover b=32 and the HAR middle batches);
+  claims are worded only for the batches measured ("HAR never saves at b=1 and b=64").
 - CIFAR-10 / UCI-HAR only; FP32; one exit placement per architecture.
