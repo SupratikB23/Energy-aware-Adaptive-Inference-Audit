@@ -215,7 +215,7 @@ def main() -> int:
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)
 
-    clocks = clock_check()
+    clocks = clock_check(warm_gpu=(device.type == "cuda"))
     coexist = co_tenancy_snapshot()
     print(f"[e2e] session={session} clock={clocks.get('verdict')} spread={clocks.get('spread_mhz')} MHz "
           f"processes={coexist.get('compute_process_count')}", flush=True)

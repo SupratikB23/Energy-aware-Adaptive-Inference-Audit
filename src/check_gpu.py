@@ -101,7 +101,7 @@ def main() -> int:
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)
 
-    clocks = clock_check()
+    clocks = clock_check(warm_gpu=True)
     coexist = co_tenancy_snapshot()
     info = {"torch": torch_info(), "vram": vram_info(), "smi": _nvidia_smi(),
             "has_nvml": bool(HAS_NVML), "git": get_git_hash("."),
