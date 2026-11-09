@@ -191,6 +191,9 @@ def main() -> int:
                     help="measurement session id (default: $PERCOM_SESSION or generated)")
     ap.add_argument("--run-tag", default=None,
                     help="short tag appended to the output name (use A/B for repeated sessions)")
+    ap.add_argument("--lock-mhz", type=float, default=None,
+                    help="the nvidia-smi -lgc clock you applied; the gate then requires every sample on it "
+                         "(use on power-limited/laptop GPUs instead of the 50%%-of-max rule)")
     ap.add_argument("--require-pinned-clock", action="store_true",
                     help="refuse to run unless the GPU clock is verifiably pinned")
     ap.add_argument("--latency-only", action="store_true",
@@ -215,7 +218,7 @@ def main() -> int:
     results = Path(args.results or cfg.get("results_root", "./results"))
     ensure_dir(results)
 
-    clocks = clock_check(warm_gpu=(device.type == "cuda"))
+    clocks = clock_check(warm_gpu=(device.type == "cuda"), expected_mhz=args.lock_mhz)
     coexist = co_tenancy_snapshot()
     print(f"[e2e] session={session} clock={clocks.get('verdict')} spread={clocks.get('spread_mhz')} MHz "
           f"processes={coexist.get('compute_process_count')}", flush=True)

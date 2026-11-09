@@ -618,6 +618,9 @@ def main() -> int:
                     help="measurement session id (default: $PERCOM_SESSION or generated)")
     ap.add_argument("--run-tag", default=None,
                     help="short tag appended to the output name (use A/B for repeated sessions)")
+    ap.add_argument("--lock-mhz", type=float, default=None,
+                    help="the nvidia-smi -lgc clock you applied; the gate then requires every sample on it "
+                         "(use on power-limited/laptop GPUs instead of the 50%%-of-max rule)")
     ap.add_argument("--require-pinned-clock", action="store_true",
                     help="refuse to run unless the GPU clock is verifiably pinned")
     args = ap.parse_args()
@@ -654,7 +657,7 @@ def main() -> int:
     ensure_dir(results)
 
     # --- clock / co-tenancy evidence (C1); nothing privileged, all recorded ---
-    clocks = clock_check(warm_gpu=(device.type == "cuda"))
+    clocks = clock_check(warm_gpu=(device.type == "cuda"), expected_mhz=args.lock_mhz)
     coexist = co_tenancy_snapshot()
     print(f"[evaluate] session={session} clock={clocks.get('verdict')} "
           f"spread={clocks.get('spread_mhz')} MHz processes={coexist.get('compute_process_count')}",

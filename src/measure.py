@@ -76,7 +76,8 @@ def _run(cmd: list[str], timeout: float = 15.0) -> tuple[int | None, str, str]:
 
 
 def clock_check(samples: int = 8, interval_s: float = 0.12, warm_gpu: bool = False,
-                warm_s: float = 2.0) -> dict:
+                warm_s: float = 2.0, expected_mhz: float | None = None,
+                tol_mhz: float = 45.0) -> dict:
     """Best-effort clock-lock evidence, no privileged calls.
 
     `nvidia-smi -lgc` does not expose a portable "is locked" query. We therefore
@@ -139,6 +140,13 @@ def clock_check(samples: int = 8, interval_s: float = 0.12, warm_gpu: bool = Fal
     # reading is only evidence of a lock if it is also near the max boost clock.
     floor = (0.5 * out["max_mhz"]) if out["max_mhz"] else 500.0
     pinned = len(vals) >= 4 and spread <= 30.0 and min(vals) >= floor
+    if expected_mhz is not None:
+        # Operator-declared lock (--lock-mhz): the samples must sit ON that clock. This replaces the
+        # 50%-of-max heuristic, which wrongly rejects power-limited (laptop) GPUs whose sustainable
+        # locked clock is below half of the nominal max boost.
+        pinned = (len(vals) >= 4 and spread <= 30.0
+                  and all(abs(v - float(expected_mhz)) <= float(tol_mhz) for v in vals))
+    out["expected_mhz"] = None if expected_mhz is None else float(expected_mhz)
     rc, q, _ = _run(["nvidia-smi", "-q", "-d", "CLOCK"], timeout=20.0)
     marker = ("locked" in q.lower()) if rc == 0 else None
     out.update({"available": True, "samples_mhz": vals, "spread_mhz": spread,

@@ -92,6 +92,25 @@ nvidia-smi --query-gpu=clocks.gr,clocks.max.gr --format=csv
 python -c "import json; from src.measure import clock_check; c=clock_check(warm_gpu=True); print(c['pinned'], c['samples_mhz'], c['sampled_under_load'])"
 # The gate proves the clock is steady, not its value: confirm the samples are ~$LOCK, not ~max boost.
 ```
+**Laptop / power-limited GPUs (RTX 5060 Laptop):** the nominal `clocks.max.gr` (e.g. 3090 MHz)
+is not reachable under sustained load, and a lock above what the power budget allows is
+overridden (clock sags and wobbles: the pinned gate correctly says False). Find a lock the card
+can really hold, then use it everywhere:
+```powershell
+# plugged in, Windows "Best performance", laptop vendor "Performance/Turbo" fan mode, lid open
+foreach ($L in 1500,1400,1300,1200,1100) {
+  nvidia-smi -lgc "$L,$L" | Out-Null
+  $r = python -c "from src.measure import clock_check; c=clock_check(warm_gpu=True, expected_mhz=$L); print(c['pinned'], c['samples_mhz'])"
+  "$L -> $r"
+}
+```
+Pick the **highest** `$L` that prints `True` with samples on that value, set `$LOCK = <that>`, re-apply
+`nvidia-smi -lgc "$LOCK,$LOCK"`, and use it in every locked block. All commands below pass
+`--lock-mhz $LOCK`, so the gate requires every sample to sit on the declared lock (within 45 MHz)
+instead of using the 50 %-of-max rule, which a laptop cannot satisfy. Then pick a margin: if
+the clock still drifts during the long runs, drop `$LOCK` one more step. Report the card as a
+*laptop* GPU in the paper.
+
 Do **training (P3.2) and calibration (P3.3) and the unlocked contrast (P3.3b) with the clock
 UNLOCKED**; lock only at the start of P3.4. Run every locked block in that **same
 Administrator shell** (so `$LOCK` stays defined). If the pilot or a quick load test shows
@@ -173,13 +192,13 @@ python src/evaluate.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dat
 **Lock now** (Step 0d, `nvidia-smi -lgc "$LOCK,$LOCK"`), then:
 ```powershell
 # full regime map, seed 42 only (hardware measurement need not repeat for every seed)
-python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 32 64 --repeats 10 --require-pinned-clock --session p3-eval-cifar-s42-A --run-tag A --results results/p3
+python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 32 64 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-cifar-s42-A --run-tag A --results results/p3
 # seed robustness: the policy cost table (b=1) and the large-batch regime (b=64)
 foreach ($s in 43,44) {
-  python src/evaluate.py --ckpt "results/p3/cifar10_exit_kd_resnet14_e20_b64_s$s.pt" --dataset cifar10 --batches 1 64 --repeats 10 --require-pinned-clock --session "p3-eval-cifar-s$s" --run-tag A --results results/p3
+  python src/evaluate.py --ckpt "results/p3/cifar10_exit_kd_resnet14_e20_b64_s$s.pt" --dataset cifar10 --batches 1 64 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session "p3-eval-cifar-s$s" --run-tag A --results results/p3
 }
 # cross-session repeat of the headline cells with the SAME seed-42 checkpoint (~14 min)
-python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --repeats 10 --require-pinned-clock --session p3-eval-cifar-s42-B --run-tag B --results results/p3
+python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-cifar-s42-B --run-tag B --results results/p3
 ```
 - Each row must show `clock ... <LOCK>-<LOCK> MHz stable=True`, `cv%` in the single digits,
   and `repeats: 10`, `randomized_order: true` in the JSON.
@@ -192,8 +211,8 @@ python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt
 ## Step P3.5. CIFAR end-to-end at b = 1, 8, 16, locked clocks (MD fix C, ~50 min)
 Two independent sessions, same checkpoint:
 ```powershell
-python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --session p3-e2e-cifar-A --run-tag A --results results/p3
-python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --session p3-e2e-cifar-B --run-tag B --results results/p3
+python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-A --run-tag A --results results/p3
+python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-B --run-tag B --results results/p3
 ```
 - Expect `[e2e] WARNING runtime != offline` to be **absent**; if present, stop — the runtime is not the measured policy.
 - Every row must have `j_ci95_halfwidth`, `n_windows: 10`, `cv_pct`, `min_window_s >= 3`, `clock_mhz` ~`$LOCK`.
@@ -205,7 +224,7 @@ Phase 2 says the reversal is at b = 16 (most policies cost more; best case saves
 only partially recovers (3-15 % saved, still far below b = 1/8). Phase 3 must measure that shape
 locked, not inherit it from Phase 2. One session, a different tag so it cannot overwrite session A:
 ```powershell
-python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 32 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --session p3-e2e-cifar-hi --run-tag Ahi --results results/p3
+python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 32 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-hi --run-tag Ahi --results results/p3
 ```
 - Writes `e2e_cifar10_resnet14_s42_Ahi.json`; single-session, so `audit compare` reports but does
   not count it as agreement. Same gates apply (`audit verify`).
@@ -214,9 +233,9 @@ python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.
 Two independent locked sessions of the same cell, to test the Phase 2 "HAR b=64 is
 unreproducible" gap:
 ```powershell
-python src/evaluate.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 8 16 32 64 --repeats 10 --require-pinned-clock --session p3-eval-har-A --run-tag A --results results/p3
-python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --session p3-har-b64-A --run-tag A --results results/p3
-python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --session p3-har-b64-B --run-tag B --results results/p3
+python src/evaluate.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 8 16 32 64 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-har-A --run-tag A --results results/p3
+python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-har-b64-A --run-tag A --results results/p3
+python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 64 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-har-b64-B --run-tag B --results results/p3
 ```
 - The two e2e runs write `..._A.json` and `..._B.json`, so neither overwrites the other.
 - The whole point is that the two sessions must land within 10 % of each other (`audit compare`).
@@ -229,7 +248,7 @@ python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --d
 Backs the claim "HAR never saves energy at any batch size" with locked, 10-repeat evidence
 (b = 64 is already covered by sessions A/B above):
 ```powershell
-python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 8 16 32 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --session p3-har-lo --run-tag Alo --results results/p3
+python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 8 16 32 --taus 0.9 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-har-lo --run-tag Alo --results results/p3
 ```
 - Writes `e2e_har_harcnn_s42_Alo.json` (single session; reported, not counted as agreement).
 

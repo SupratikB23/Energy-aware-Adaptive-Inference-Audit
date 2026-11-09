@@ -1028,6 +1028,21 @@ def test_clock_check_does_not_call_an_idle_clock_pinned(monkeypatch):
     assert r2["pinned"] is True and r2["floor_mhz"] == 1050
 
 
+def test_clock_check_expected_mhz_gate(monkeypatch):
+    """--lock-mhz: samples must sit on the declared lock; below-50%-of-max is fine then."""
+    def mk(vals):
+        seq = iter(["1200, 3090"] + [str(v) for v in vals])
+        monkeypatch.setattr(measure, "_run",
+                            lambda cmd, timeout=15.0: (0, "", "") if "-q" in cmd else (0, next(seq), ""))
+    mk([1200, 1200, 1215, 1200, 1200, 1215, 1200, 1200])
+    r = measure.clock_check(samples=8, interval_s=0.0, expected_mhz=1200)
+    assert r["pinned"] is True and r["expected_mhz"] == 1200.0
+    mk([1447, 1447, 1672, 1672, 1267, 1267, 1267, 1335])  # the sagging RTX 5060 laptop readings
+    assert measure.clock_check(samples=8, interval_s=0.0, expected_mhz=2160)["pinned"] is False
+    mk([1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200])
+    assert measure.clock_check(samples=8, interval_s=0.0, expected_mhz=2160)["pinned"] is False
+
+
 def test_clock_check_warm_gpu_is_noop_without_cuda(monkeypatch):
     """warm_gpu must never crash or fake a load on a CPU-only box."""
     monkeypatch.setattr(measure.torch.cuda, "is_available", lambda: False)
