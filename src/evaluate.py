@@ -654,7 +654,7 @@ def main() -> int:
     ensure_dir(results)
 
     # --- clock / co-tenancy evidence (C1); nothing privileged, all recorded ---
-    clocks = clock_check()
+    clocks = clock_check(warm_gpu=(device.type == "cuda"))
     coexist = co_tenancy_snapshot()
     print(f"[evaluate] session={session} clock={clocks.get('verdict')} "
           f"spread={clocks.get('spread_mhz')} MHz processes={coexist.get('compute_process_count')}",
