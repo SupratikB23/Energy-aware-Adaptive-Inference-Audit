@@ -75,7 +75,8 @@ def _run(cmd: list[str], timeout: float = 15.0) -> tuple[int | None, str, str]:
         return None, "", repr(e)[:300]
 
 
-def clock_check(samples: int = 8, interval_s: float = 0.12) -> dict:
+def clock_check(samples: int = 8, interval_s: float = 0.12, warm_gpu: bool = False,
+                warm_s: float = 2.0) -> dict:
     """Best-effort clock-lock evidence, no privileged calls.
 
     `nvidia-smi -lgc` does not expose a portable "is locked" query. We therefore
@@ -98,16 +99,38 @@ def clock_check(samples: int = 8, interval_s: float = 0.12) -> dict:
     except Exception:
         pass
     vals: list[float] = []
-    for _ in range(max(1, int(samples))):
-        rc, line, _ = _run(["nvidia-smi", "--query-gpu=clocks.gr",
-                            "--format=csv,noheader,nounits"])
-        if rc == 0 and line.strip():
-            try:
-                vals.append(float(line.strip().splitlines()[0]))
-            except ValueError:
-                pass
-        if interval_s > 0:
-            time.sleep(float(interval_s))
+    # A locked card can still sit in a low idle P-state (e.g. 0-540 MHz on Blackwell) until work
+    # arrives, so an idle sample says nothing about the lock. With warm_gpu we run a short matmul
+    # load, let the clock settle, and sample *under load*; the verdict then reflects the lock.
+    stop = threading.Event()
+    worker = None
+    out["sampled_under_load"] = False
+    if warm_gpu and torch.cuda.is_available():
+        def _spin():
+            a = torch.randn(2048, 2048, device="cuda")
+            while not stop.is_set():
+                a = a @ a
+                a = a / (a.norm() + 1e-6)
+            torch.cuda.synchronize()
+        worker = threading.Thread(target=_spin, daemon=True)
+        worker.start()
+        time.sleep(max(0.0, float(warm_s)))
+        out["sampled_under_load"] = True
+    try:
+        for _ in range(max(1, int(samples))):
+            rc, line, _ = _run(["nvidia-smi", "--query-gpu=clocks.gr",
+                                "--format=csv,noheader,nounits"])
+            if rc == 0 and line.strip():
+                try:
+                    vals.append(float(line.strip().splitlines()[0]))
+                except ValueError:
+                    pass
+            if interval_s > 0:
+                time.sleep(float(interval_s))
+    finally:
+        stop.set()
+        if worker is not None:
+            worker.join(timeout=10.0)
     if not vals:
         out["note"] = "nvidia-smi returned no clock value"
         return out

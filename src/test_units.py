@@ -1027,6 +1027,16 @@ def test_clock_check_does_not_call_an_idle_clock_pinned(monkeypatch):
     r2 = measure.clock_check(samples=8, interval_s=0.0)
     assert r2["pinned"] is True and r2["floor_mhz"] == 1050
 
+
+def test_clock_check_warm_gpu_is_noop_without_cuda(monkeypatch):
+    """warm_gpu must never crash or fake a load on a CPU-only box."""
+    monkeypatch.setattr(measure.torch.cuda, "is_available", lambda: False)
+    seq = iter(["1500, 2100"] + ["1500"] * 8)
+    monkeypatch.setattr(measure, "_run",
+                        lambda cmd, timeout=15.0: (0, "", "") if "-q" in cmd else (0, next(seq), ""))
+    r = measure.clock_check(samples=8, interval_s=0.0, warm_gpu=True, warm_s=0.0)
+    assert r["sampled_under_load"] is False and r["pinned"] is True
+
 def test_cli_evaluate_run_tag_namespaces_output(tmp_path):
     r = _run(["src/evaluate.py", "--dataset", "kws", "--arch", "dscnn-s", "--synthetic",
               "--skip-energy", "--run-tag", "B", "--lat-iters", "4"], tmp_path)
