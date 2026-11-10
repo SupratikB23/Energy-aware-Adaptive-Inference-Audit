@@ -318,7 +318,7 @@ def main() -> int:
                 passes.append(k)
             samples = {i: [] for i in range(len(cells))}
             lat = {i: [] for i in range(len(cells))}
-            clocks = {i: [] for i in range(len(cells))}
+            cell_clocks = {i: [] for i in range(len(cells))}
             durations = {i: [] for i in range(len(cells))}
 
             def _measure_cell(i):
@@ -344,7 +344,7 @@ def main() -> int:
                             samples[i].append(res.per_iter_marginal_j / m)
                         durations[i].append(float(res.duration_s))
                         lat[i].append(1e3 * res.duration_s / (passes[i] * m))
-                        clocks[i].append(res.device_after.get("clock_graphics_mhz"))
+                        cell_clocks[i].append(res.device_after.get("clock_graphics_mhz"))
                     else:
                         cuda_sync()
                         t0 = time.perf_counter()
@@ -381,7 +381,7 @@ def main() -> int:
                        "ms_ci95_halfwidth": mean_ci95(lat[i])["ci95_halfwidth"],
                        "window_duration_s": durations[i],
                        "min_window_s": min(durations[i]) if durations[i] else None,
-                       "clock_mhz": [c for c in clocks[i] if c is not None],
+                       "clock_mhz": [c for c in cell_clocks[i] if c is not None],
                        "saving_vs_full_pct": (100 * (e_full - e) / e_full) if (e is not None and e_full) else None,
                        "pred_table_j": pred_table, "pred_table_err_pct": summarize_prediction(e, pred_table),
                        "pred_flops_j": pred_flops, "pred_flops_err_pct": summarize_prediction(e, pred_flops)}
