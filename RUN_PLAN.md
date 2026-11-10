@@ -25,8 +25,8 @@
 > preliminary secondary platform. The locked clock is no longer a fixed 1500 MHz: it is
 > `$LOCK`, derived per GPU in Step 0d, and must be identical in every locked block.
 > Phase 3 is *complete on its own* for the paper's four claims, so Phase 2 does not have to be rerun.
-> The laptop-lite plan (P3.4+) measures CIFAR b=1/8/16/64 and HAR b=1/64 locked; the dropped
-> cells (CIFAR b=32, HAR b=8/16/32) are optional extensions and the paper wording is narrowed
+> The laptop-lite plan (P3.4+) measures CIFAR b=1/8/16 and HAR b=1/64 locked; the dropped
+> cells (CIFAR b=32/64, HAR b=8/16/32) are optional extensions and the paper wording is narrowed
 > accordingly (see 'What the Lite plan can and cannot claim').
 
 ## Step 0a. Setup (GPU box, once)
@@ -127,7 +127,7 @@ that mistake impossible.
 
 ---
 
-# PHASE 3 — pre-submission hardening (laptop-lite locked plan: ~2.5–3 h from P3.4; training, P3.3 and P3.3b are already done)
+# PHASE 3 — pre-submission hardening (laptop-lite locked plan: ~2–2.25 h from P3.4; training, P3.3 and P3.3b are already done)
 
 Set one session id per block so the audit can group the runs:
 ```powershell
@@ -193,7 +193,7 @@ python src/evaluate.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dat
 ## LAPTOP-LITE LOCKED PLAN (P3.4 – P3.8): the minimum run set for the paper
 
 The target machine is an **RTX 5060 Laptop GPU** (power-limited, shared thermals). The original
-P3.4–P3.6b matrix (~3.5 h of continuous full-load measurement) is cut to **~2.5–3 h including cooldowns** (about 1.7 h of actual measurement) by dropping
+P3.4–P3.6b matrix (~3.5 h of continuous full-load measurement) is cut to **~2 h** by dropping
 cells that are not needed for the four claims. **Nothing that the audit gate depends on is
 reduced**: still >= 10 randomized repeats, windows >= 3 s, 60 s idle + 120 s warmup, locked clock,
 `--require-pinned-clock --lock-mhz $LOCK`, `audit verify` all PASS. Only the *number of cells and
@@ -203,55 +203,62 @@ would have supported are narrowed in the paper (see "What the Lite plan can and 
 Prerequisites (Administrator PowerShell, venv active, repo folder, `$LOCK = 1500` applied, the
 under-load `clock_check` printed `True`). Training, calibration and P3.3b are already done.
 
-Thermal hygiene for a laptop (do this every time): plugged in, "Best performance", vendor
-Turbo/Performance fan mode, lid open, laptop on a hard surface. Define this helper once, and run
-`Cool` **between every command below**; it prints temperature/power/clock and waits 5 minutes:
+Speed first, no cooldown pauses. Plugged in, "Best performance", lid open; no overclocking or
+performance tuning. Paste this helper **once per window**. It runs a command only if its output
+JSON does not exist yet, so the whole block can be pasted again after an interruption and it
+continues from where it stopped (a killed run writes no JSON, so that one simply reruns):
 ```powershell
-function Cool { nvidia-smi --query-gpu=temperature.gpu,power.draw,clocks.gr --format=csv; Start-Sleep -Seconds 300 }
+function RunOnce($out, [scriptblock]$cmd) {
+  if (Test-Path $out) { "SKIP (already done): $out"; return }
+  & $cmd
+  if ($LASTEXITCODE -ne 0) { throw "FAILED (exit $LASTEXITCODE): $out" }
+}
 ```
-If the GPU temperature printed before a run is above ~80 C, run `Cool` again before starting.
-If a row's clock range drops below `$LOCK`, STOP: lower `$LOCK` one step (1400), re-apply, re-check,
-and rerun **all** locked blocks at the new value (never mix two lock values in one dataset).
+**Why a run can look frozen (it is not):** a line prints only when one (batch, mode) finishes, and
+every energy window is >= 1000 iterations AND >= 3 s. Expect about 4-8 min between lines at b=1/8
+and 8-12 min at b=16. Sanity check while waiting (second window): `nvidia-smi` should show GPU
+utilisation well above 0 % and a clock near `$LOCK`. If it sits at 0 % / idle clock for more
+than ~5 minutes while python is running, press Ctrl+C and rerun the block (finished outputs are skipped).
+If a row's clock range drops below `$LOCK`, STOP: lower `$LOCK` one step (1400), re-apply,
+re-check, and rerun **all** locked blocks at the new value (never mix two lock values in one dataset).
+Do NOT lower `--repeats`, `--energy-iters`, `--warmup-seconds` or `--idle-seconds`: `audit verify` fails it.
 
-### Step P3.4. CIFAR per-exit energy, seed 42 + seed spot-check (~35 min)
+### Step P3.4. CIFAR per-exit energy, seed 42 + seed spot-check (~50-60 min)
+Paste the whole block; it can be re-pasted safely:
 ```powershell
-# A: regime map at b = 1, 8, 16, 64 (b=32 is dropped: it adds no new regime, see Optional O1)
-python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 64 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-cifar-s42-A --run-tag A --results results/p3
-Cool
+# A: regime map at b = 1, 8, 16 (b=64 and b=32 are Optional O1: at b=64 every window is ~10 s)
+RunOnce "results/p3/eval_cifar10_resnet14_s42_A.json" { python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-cifar-s42-A --run-tag A --results results/p3 }
 # seed spot-check at batch 1 only (the policy-cost-table regime), seeds 43 and 44
 foreach ($s in 43,44) {
-  python src/evaluate.py --ckpt "results/p3/cifar10_exit_kd_resnet14_e20_b64_s$s.pt" --dataset cifar10 --batches 1 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session "p3-eval-cifar-s$s" --run-tag A --results results/p3
-  Cool
+  RunOnce "results/p3/eval_cifar10_resnet14_s${s}_A.json" { python src/evaluate.py --ckpt "results/p3/cifar10_exit_kd_resnet14_e20_b64_s$s.pt" --dataset cifar10 --batches 1 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session "p3-eval-cifar-s$s" --run-tag A --results results/p3 }
 }
 ```
 - Each row must show `clock ... 1500-1500 MHz stable=True`, `cv%` in the single digits,
   `repeats: 10`, `randomized_order: true`.
 - **KILL-2:** if batch-1 adjacent exits are not resolvable at 10 locked repeats, report it as a C1 limit.
 - `e2e` (next step) reads the additive per-exit table from `eval_cifar10_resnet14_s42_A.json`,
-  so this file must cover every batch the e2e runs use (1, 8, 16, 64). It does.
+  so this file must cover every batch the e2e runs use (1, 8, 16). It does.
+- Rough split of the first command: b=1 about 8 min (both modes), b=8 about 8 min, b=16 about 12 min, plus
+  3 min idle/warmup. Seeds 43/44: about 11 min each. These are scaled estimates; time the first line to adjust.
 
-### Step P3.5. CIFAR end-to-end, locked (~35 min)
-Session A covers b = 1, 8, 16, 64; session B repeats only b = 1, 8 (the batches where early exit
-actually saves energy, so the cross-session claim is about the cells that matter). Only the two
-upper thresholds are run (`--taus 0.97 0.99`; 0.99 is the LTT-certified point):
+### Step P3.5. CIFAR end-to-end, locked (~30 min)
+Session A covers b = 1, 8, 16; session B repeats b = 1, 8 (the batches where early exit actually
+saves energy, so the cross-session claim is about the cells that matter). Only the two upper
+thresholds are run (`--taus 0.97 0.99`; 0.99 is the LTT-certified point):
 ```powershell
-python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 64 --taus 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-A --run-tag A --results results/p3
-Cool
-python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 --taus 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-B --run-tag B --results results/p3
-Cool
+RunOnce "results/p3/e2e_cifar10_resnet14_s42_A.json" { python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --taus 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-A --run-tag A --results results/p3 }
+RunOnce "results/p3/e2e_cifar10_resnet14_s42_B.json" { python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 --taus 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-B --run-tag B --results results/p3 }
 ```
 - `[e2e] WARNING runtime != offline` must be **absent**; if present, stop: the e2e numbers are invalid.
 - Every row needs `j_ci95_halfwidth`, `n_windows: 10`, `cv_pct`, `min_window_s >= 3`, `clock_mhz` ~1500.
 
-### Step P3.6. UCI-HAR, locked (~35 min)
+### Step P3.6. UCI-HAR, locked (~30 min)
 Eval at b = 1, 64 (the two extremes); e2e session A at b = 1, 64; session B repeats b = 64 only
 (the cell that was unreproducible in Phase 2):
 ```powershell
-python src/evaluate.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 64 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-har-A --run-tag A --results results/p3
-Cool
-python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 64 --taus 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-har-A --run-tag A --results results/p3
-Cool
-python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 64 --taus 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-har-b64-B --run-tag B --results results/p3
+RunOnce "results/p3/eval_har_harcnn_s42_A.json" { python src/evaluate.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 64 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-har-A --run-tag A --results results/p3 }
+RunOnce "results/p3/e2e_har_harcnn_s42_A.json" { python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 1 64 --taus 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-har-A --run-tag A --results results/p3 }
+RunOnce "results/p3/e2e_har_harcnn_s42_B.json" { python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --dataset har --batches 64 --taus 0.97 0.99 --perhead-from results/p3/eval_har_harcnn_s42_A.json --eval-json results/p3/eval_har_harcnn_s42_A.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-har-b64-B --run-tag B --results results/p3 }
 ```
 - `audit compare` must show the HAR b = 64 cell within 10 % across A and B; if not, that is a C1 finding.
 
@@ -275,17 +282,17 @@ Never commit `data/`, `results/`, `*.pt`, `*.csv`.
 | Claim | Lite evidence | Wording in the paper |
 |---|---|---|
 | C1 locked vs unlocked | P3.3b (done) + P3.4 b=1/8 | unchanged |
-| C2 CIFAR regime | b = 1, 8, 16, 64 per-exit + e2e | "at batch 1, 8, 16 and 64" (b=32 omitted) |
-| C3 additive table under-predicts | every e2e cell above (CIFAR 4 batches, HAR 2 batches) | unchanged |
+| C2 CIFAR regime | b = 1, 8, 16 per-exit + e2e (b=32/64 optional O1) | "at batch 1, 8 and 16"; large-batch recovery only if O1 is run |
+| C3 additive table under-predicts | every e2e cell above (CIFAR 3 batches, HAR 2 batches) | unchanged |
 | HAR early exit never saves | HAR e2e b = 1 and 64, locked | "at b = 1 and b = 64" (not "every batch") |
 | Reproducibility | A/B on CIFAR b=1, 8 and HAR b=64; seed spot-check at b=1 | "three repeated cells + two extra seeds at b=1" |
 | Seed robustness | 3 trained seeds (accuracy + calibration) + energy at b=1 for 3 seeds | no claim for seeds at b=64 |
 
 ### Optional extensions (only if the laptop copes and time remains; each is independent)
 ```powershell
-# O1. CIFAR b=32 (needs the eval table at b=32 first)
-python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 32 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-cifar-s42-A32 --run-tag A32 --results results/p3
-python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 32 --taus 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_A32.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-32 --run-tag A32 --results results/p3
+# O1. CIFAR b=32 and b=64 (slow: b=64 windows are ~10 s each; needs the eval table first) ~45 min
+RunOnce "results/p3/eval_cifar10_resnet14_s42_Ahi.json" { python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 32 64 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-cifar-s42-Ahi --run-tag Ahi --results results/p3 }
+RunOnce "results/p3/e2e_cifar10_resnet14_s42_Ahi.json" { python src/e2e_policy.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 32 64 --taus 0.97 0.99 --perhead-from results/p3/eval_cifar10_resnet14_s42_A.json --eval-json results/p3/eval_cifar10_resnet14_s42_Ahi.json --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-e2e-cifar-hi --run-tag Ahi --results results/p3 }
 # O2. CIFAR per-exit session B (cross-session eval repeat, b = 1, 8, 16)
 python src/evaluate.py --ckpt results/p3/cifar10_exit_kd_resnet14_e20_b64_s42.pt --dataset cifar10 --batches 1 8 16 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session p3-eval-cifar-s42-B --run-tag B --results results/p3
 # O3. HAR middle batches (8, 16, 32)
@@ -302,18 +309,19 @@ python src/e2e_policy.py --ckpt results/p3/har_exit_kd_harcnn_e20_b64_s42.pt --d
 ### Laptop-lite locked plan (what the friend runs now, RTX 5060 Laptop)
 | Block | What | Estimate |
 |---|---|---|
-| P3.4 | CIFAR eval A (b=1/8/16/64) + seeds 43/44 at b=1 | 33–38 min |
-| P3.5 | CIFAR e2e A (b=1/8/16/64) + B (b=1/8) | 35–40 min |
-| P3.6 | HAR eval (b=1/64) + e2e A (b=1/64) + e2e B (b=64) | 30–35 min |
+| P3.4 | CIFAR eval A (b=1/8/16, both modes) + seeds 43/44 at b=1 | 50-60 min |
+| P3.5 | CIFAR e2e A (b=1/8/16) + B (b=1/8) | 30 min |
+| P3.6 | HAR eval (b=1/64) + e2e A (b=1/64) + e2e B (b=64) | 30 min |
 | P3.7 | audit | 1 min |
-| cooldowns | about 8 x 5 min between commands (`Cool`) | 40 min |
-| **Total locked measurement** | clean pass | **~2.5–3 h** |
-| worst case | one retry + lowered `$LOCK` rerun | **~4–5 h** |
+| **Total locked measurement** | clean pass, no cooldowns | **~2-2.25 h** |
+| worst case | one retry + lowered `$LOCK` rerun | **~4 h** |
 
-Fixed cost per command is 3 minutes (60 s idle + 120 s warmup), so fewer commands saves more than
-fewer batches. The earlier full plan was ~3.5 h of measurement without cooldowns (~5 h with them).
+Suggested split: **day 1 = P3.4 only** (~1 h, paste the whole block), **day 2 = P3.5 + P3.6 + P3.7** (~1.1 h).
+Each energy window is >= 1000 iterations and >= 3 s, so large batches are slow (a CIFAR b=64 window is
+~10 s on this laptop); that is why CIFAR b=64 is optional. Fixed cost per command is 3 minutes
+(60 s idle + 120 s warmup), so fewer commands saves more than fewer batches. My first estimate (35 min
+for P3.4) assumed 3 s windows and was too low; these figures are still scaled estimates, not measurements.
 Already done and not repeated: pilot, 3-seed training, calibration, P3.3b unlocked contrast.
-These are scaled estimates, not measurements; update them after the first block.
 
 ### Original full locked plan (3070 timings, kept for reference; replaced by the Lite plan on the laptop)
 | Block | What | Estimate |
@@ -364,7 +372,6 @@ If you also want the **full** Phase 2 matrix re-run at 10 repeats for both workl
 | `nvmlInit() failed` | driver/CUDA mismatch; reinstall driver-matched torch; retry `nvidia-smi` |
 | `has_energy_counter: false` | Poll-only cannot be self-validated -> KILL-1. Needs an external meter |
 | `--require-pinned-clock` exits 2 | Run `nvidia-smi -lgc "$LOCK,$LOCK"` in an Administrator shell first; confirm `clocks.gr ~= $LOCK`, not ~210. If `$LOCK` < 50 % of `clocks.max.gr` the gate rejects it by design: raise it |
-| GPU temperature > ~80 C before a block (laptop) | run `Cool` again; plugged in, Turbo fan mode, hard surface. Never skip the cooldowns to save time |
 | Clock sags below `$LOCK` under load | Power/thermal throttle: lower `$LOCK` for ALL locked blocks (and re-run any already done) |
 | Blackwell (RTX 50) cannot give a hardware energy counter | Pilot fails (KILL-1). Energy claims on that card are blocked; do not fall back to 1 Hz or synthetic Joules |
 | Clock reads ~210 after `-lgc` | Lock did not take (driver/permission). Do not disable the gate; fix the lock |
