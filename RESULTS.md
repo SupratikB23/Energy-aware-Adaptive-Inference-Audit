@@ -1,16 +1,53 @@
-# RESULTS — measured-energy audit of early-exit policies (CIFAR-10, RTX 3070)
+# RESULTS — measured-energy audit of early-exit policies (CIFAR-10 + UCI-HAR; RTX 3070 Phase 1/2, RTX 5060 Laptop Phase 3)
 
-Scope: RUN_PLAN Phase 1 (Steps 1–4) **and Phase 2 (Steps 5–8)** on one GPU box. All numbers
-below are read from `results/` (files listed in §9, §10.8 and §11.7). §0 is the current verdict;
-§10–§11 hold the Phase 2 results. **Phase 3 (RUN_PLAN P3.1–P3.8) is the pre-submission
-hardening pass: 3 training seeds, locked clocks everywhere, >=10 randomized windows, 95 % CIs,
-cross-session audit. Its results are not in this file yet — do not present Phase 2 numbers as
-final until Phase 3 is complete.** Research framing and kill criteria:
+Scope: RUN_PLAN Phase 1 (Steps 1–4) and Phase 2 (Steps 5–8) on an **RTX 3070** (§0–§11, preliminary,
+secondary platform), and **Phase 3 (P3.1–P3.8) on an RTX 5060 Laptop GPU (§12, the headline
+platform)**. Phase 3 is the pre-submission hardening pass: 3 training seeds, locked clock, >=10
+randomized windows, 95 % CIs, cross-session audit. The two platforms are never pooled. Research
+framing and kill criteria:
 [percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md).
 
-> **Platform note.** Everything in this file (Phase 1/2) was measured on the RTX 3070 below. If
-> Phase 3 is run on a different GPU, it is a separate platform and its numbers are not pooled
-> with these; this file is then the preliminary secondary-platform record.
+> **Platform note.** §0–§11 (Phase 1/2) were measured on the RTX 3070 below (`results/`, 3 repeats, mostly
+> unlocked clocks, ~19 background GPU processes). §12 (Phase 3) was measured on a different GPU
+> (`new_results/results/p3/`), so it is a self-contained platform and its numbers are not pooled with §0–§11.
+> Where the two disagree (for example, unlocked batch-1 resolvability), both are reported.
+
+## Results map (read this first)
+
+**A. Which folder holds which phase** (all three are gitignored)
+
+| Folder | Platform | Phase | Content |
+|---|---|---|---|
+| `results_old/` | RTX 3070 | Phase 1 only | 18 files, **byte-identical** to the Phase 1 subset of `results/` (checked by hash). Redundant; safe to delete. |
+| `results/` | RTX 3070 | Phase 1 + Phase 2 | Phase 1: 11:17–14:14 on Sep 19. Phase 2: 16:32 Sep 19 – 03:49 Sep 20. Also a stray empty `audit_old_compare.json` (0 cells compared) and the misrouted first HAR e2e run `e2e_har_harcnn.json`. |
+| `new_results/results/p3/` | RTX 5060 Laptop | Phase 3, locked | 40 files: checkpoints, training/LTT/eval/e2e JSONs, `audit_verify.json`, `audit_compare.json`. |
+| `new_results/results/p3_unlocked/` | RTX 5060 Laptop | Phase 3, P3.3b | 2 eval files with the clock unlocked (kept apart because they intentionally fail the pinned-clock gate). |
+
+**B. What was run in each phase**
+
+| Phase | Platform / git | Steps | What it produced | Where in this file |
+|---|---|---|---|---|
+| **1** | RTX 3070, driver 591.86; git `0167720` (pilot, CIFAR training), `5eacc30` (eval) | Steps 1–4: telemetry pilot; CIFAR training (teacher, student, exit_ce, exit_kd); LTT α-sweep; per-exit energy `eval_run1/2` (3 repeats) | Telemetry check (0.16 %), regime map, first policy benchmark | §0–§9 |
+| **2** | RTX 3070; git `e83076f` | 5 pooled-cost policy re-pricing; 6 CIFAR end-to-end (unlocked); 7 UCI-HAR (training, LTT, eval, end-to-end); 8 locked-vs-unlocked batch-1/8 at 10 repeats, HAR locked e2e | Locking test, HAR negative result, table error, compaction vs batch-wait | §10–§11 |
+| **3** | RTX 5060 Laptop, driver 610.62; git `7b90eae` (training, unlocked contrast), `0960180` (locked eval/e2e) | P3.2 3-seed training; P3.3 LTT; P3.3b unlocked contrast; P3.4 per-exit eval; P3.5 CIFAR e2e; P3.6 HAR eval + e2e; P3.7 audit | Self-contained hardening benchmark | §12 |
+
+**C. Phase 3 subdivisions: status against RUN_PLAN (verified from the files on Nov 12)**
+
+| Step | Content | Files | Status | Section |
+|---|---|---|---|---|
+| P3.1 | CPU smoke + unit tests | not a result file | not in the data; run on the dev machine | — |
+| 0c pilot | counter-vs-poll telemetry check on the 5060 | **none delivered** | ⚠️ **missing** (limitation, see §12.7) | — |
+| P3.2 | 3 seeds × {CIFAR teacher, CIFAR exit_kd, HAR teacher, HAR exit_kd} | 12 `.json` + 12 `.pt` | ✅ done | §12.2 |
+| P3.3 | LTT per seed (CIFAR α=0.02, HAR α=0.05) | 6 `ltt_*` | ✅ done | §12.3 |
+| P3.3b | unlocked contrast, b=1/8, CIFAR + HAR (seed 42) | 2 `eval_*_U` | ✅ done | §12.4c |
+| P3.4 | CIFAR per-exit eval, seed 42 at b=1/8/16; seeds 43/44 at b=1 | 3 `eval_cifar*_A` | ✅ done | §12.4, §12.4b |
+| P3.5 | CIFAR end-to-end: session A (b=1/8/16), session B (b=1/8) | `e2e_cifar*_A`, `_B` | ✅ done | §12.5 |
+| P3.6 | HAR eval (b=1/64); e2e A (b=1/64); e2e B (b=64) | `eval_har*_A`, `e2e_har*_A`, `_B` | ✅ done | §12.4, §12.5 |
+| P3.7 | `audit verify` (8 files) and `audit compare` (24 repeated cells) | 2 audit JSONs | ✅ 8/8 pass; 20/24 within 10 % | §12.6 |
+| P3.8 | `nvidia-smi -rgc` (unlock) | none | cannot be verified from files | — |
+| O1–O3 | CIFAR b=32/64; CIFAR eval session B; HAR b=8/16/32 | none | not run (optional) | claims narrowed |
+
+Not run, so no claim is made: CIFAR b=32/64, HAR b=8/16/32 locked, end-to-end for seeds 43/44, any battery-powered device.
 
 **Setup.** NVIDIA GeForce RTX 3070 (8 GB, sm_86, 270 W limit), driver 591.86, torch 2.7.0+cu126,
 Python 3.11.9, Windows. FP32 inference (cuDNN TF32 on, matmul TF32 off, cudnn.benchmark on).
@@ -37,7 +74,7 @@ seeded randomized order, Student-t 95 % CIs, pinned-clock evidence, co-tenancy s
 | LTT accuracy-risk guarantee holds on held-out split | CIFAR α = 0.02 / 0.03 / 0.05 and HAR α = 0.03 / 0.05; α = 0.01 uncertifiable | ✅ |
 | **Phase 2:** locked clocks restore batch-1 measurability | batch-1 cascade: 0/3 → 3/3 adjacent exits resolvable; identical-workload mismatch 16–54 % → 7 % | ✅ (§10.2) |
 | **Phase 2:** early exit saves energy end to end, **CIFAR ResNet-14** | **Yes, at small batch only.** Saves 18–67 % at b = 1 and 18–49 % at b = 8; at b = 16 it mostly reverses (costs up to 29 %, best case saves 3 %); b = 64 recovers only to 3–15 % saved, far below b = 1 | ✅ (§11.1) |
-| **Phase 2:** early exit saves energy end to end, **HAR CNN (97 k params)** | **No, never.** Costs 6–241 % more than the full model at every batch size, under both default and locked clocks | ❌ key finding (§11.2) |
+| **Phase 2:** early exit saves energy end to end, **HAR CNN (97 k params)** | **No, never (in the final rerun).** Costs 6–193 % more than the full model under compaction (up to 241 % with batch-wait) at every batch size, under both default and locked clocks. The first, misrouted run had 5 compaction cells that saved (b = 32 and b = 64, e.g. −24 % at b = 64), which the rerun did not reproduce (§11.2) | ❌ key finding (§11.2) |
 | **Phase 2:** the additive per-exit table predicts real policy energy | **No.** It under-predicts energy by 3–39 % (CIFAR) and 53–87 % (HAR); i.e. it promises savings that do not appear | ❌ key finding (§11.3) |
 | **Phase 2:** FLOPs predict end-to-end policy energy | CIFAR −45 … +84 %, HAR −71 … −94 % | ❌ key finding (§11.3) |
 | **Phase 2:** is the HAR result a DVFS artefact? | **No.** With clocks locked at 1500 MHz, early exit still costs 22–189 % more than the full model | ✅ (§11.2) |
@@ -491,11 +528,11 @@ model, compaction (positive = early exit costs MORE):
   more than the 3.9 MFLOPs of convolution they skip.
 
 **Reproducibility of this run (the old misrouted `results/e2e_har_harcnn.json` vs the new one).**
-Same command, different day: 34 of 44 cells agree within 10 %, worst case 39 % (b = 1, conf 0.99).
+Same command, different day: 34 of 50 paired rows agree within 10 % (recomputed from both JSONs), worst case 39 % (b = 1, conf 0.99).
 But the **b = 64 full-model baseline moved 30 %** (0.346 → 0.241 mJ), and that alone flipped the only
 positive HAR cell in the earlier run (per-head 0.6/0.6 "saves 24 % at b = 64") into "costs 8 %".
 Report this: single-shot baselines on a millijoule-scale workload are not trustworthy, and the
-conclusion should rest on the sign across all 44 cells, not on any one cell.
+conclusion should rest on the sign across all 45 policy cells of the rerun (all positive under compaction), not on any one cell.
 
 ### 11.3 The core claim: the additive cost table over-promises
 `pred_table_err_pct` = (table prediction − measured) / measured. Negative means **the table predicts
@@ -510,7 +547,8 @@ less energy than the policy actually burns**, i.e. it promises savings that do n
 | 64 | −22 … −14 % | −31 … −21 % | −77 … −53 % | −91 … −71 % |
 
 - **The additive per-exit table, measured on the same GPU minutes earlier, still under-prices real
-  policy energy in 46 of 48 cells.** This is the paper's central result: even replacing FLOPs with
+  policy energy in 109 of 111 policy cells** (CIFAR 52/54, HAR 45/45, HAR locked 12/12; both runtime
+  modes; recomputed from the JSONs; an earlier draft said "46 of 48", which does not match the files). This is the paper's central result: even replacing FLOPs with
   *measured* per-exit energy does not fix policy pricing, because the missing cost is the exit
   machinery itself (launches, host syncs, the clock state it induces), not the arithmetic.
 - The two cells where the table is accurate (±2 %) are CIFAR batch 1 with aggressive per-head
@@ -550,8 +588,9 @@ a clean secondary contribution.
    (Phase 3 adds seeds 42/43/44), FP32, one exit placement per architecture, no battery-powered device.
 4. HAR KD hurt (teacher 92.74 % < CE student 93.42 %); report `exit_ce` as the stronger baseline.
 
-Phase 3 outputs go to `results/p3/` with seed-suffixed names (`*_s42`, `*_s43`, `*_s44`) and the
-`audit_verify.json` / `audit_compare.json` files. **Their full analysis on the new RTX 5060 Laptop (Blackwell) platform is detailed in §12 below.**
+Phase 3 outputs were written to `results/p3/` on the 5060 box with seed-suffixed names (`*_s42`, `*_s43`, `*_s44`) and the
+`audit_verify.json` / `audit_compare.json` files; on the analysis machine they sit in `new_results/results/p3/`
+(and `p3_unlocked/`). **Their full analysis on the new RTX 5060 Laptop (Blackwell) platform is detailed in §12 below.**
 
 ---
 
@@ -576,7 +615,7 @@ To understand these results without getting lost in the equations:
    - *In Simple Terms:* Research papers often calculate early exit energy by saying: *"If 70% of inputs exit at Head 0 and 30% exit at Head 1, just multiply 70% by Head 0's cost and 30% by Head 1's cost."*  
    - *What the Hardware Actually Paid:* When we measure the real GPU at the wall meter, the table **predicted 23% to 54% less energy than was measured on images (CIFAR)** and **68% to 89% less on wearable sensors (HAR)** (table error = (table − measured)/measured, negative in all 55 policy cells). The table completely ignores the physical "toll" the GPU pays to check exit confidence, split tensors, and make decisions on the fly.
 2. **Batching Beats Early Exit:**
-   - *In Simple Terms:* Developers use early exit hoping to save power. But on modern GPUs, simply gathering samples into a batch (e.g. batch size 8 or 16) and running the standard network is almost always cheaper than running early exit. Early exit only saved energy at batch size 1. By batch size 8 and 16, early exit actually **lost** energy (burned up to 36% more power).
+   - *In Simple Terms:* Developers use early exit hoping to save power. But on modern GPUs, simply gathering samples into a batch (e.g. batch size 8 or 16) and running the standard network is usually cheaper than running early exit. Early exit's only clear saving was at batch size 1 with the most aggressive thresholds. By batch size 8 and 16, most policies **lost** energy (up to +23% under compaction, +36% under batch-wait); only the most aggressive policy (P3, 2.3 points of accuracy lost) still saved about 10%.
 3. **Pervasive Wearable Models (UCI-HAR CNN) Suffer a Catastrophic Penalty:**
    - *In Simple Terms:* On wearable activity tracking (a tiny 97,000 parameter network), early exit was a total loss. Because the network is already small, the extra machinery required to check exit confidence costs **140% to 240% MORE energy** than just running the entire network. FLOP calculations promised a 90% savings, but the physical meter showed a 2× to 3× energy penalty.
 4. **Clock locking fixes the operating point, not resolvability, on this GPU:**
@@ -602,30 +641,43 @@ All models were trained across 3 random seeds ($s=42, 43, 44$) for 20 epochs at 
 ### 12.3 Learn-Then-Test (LTT) Risk Certification (Step P3.3, C4)
 
 Calibrated on the 5,000-sample calibration split using Hoeffding bounds with confidence level $1 - \delta = 0.90$:
-- **CIFAR-10 ($\alpha = 0.02$ risk bound):**
-  - Seed 42: selected $\tau = 0.99$ (empirical risk = 0.0030, deploy accuracy 91.76%, exit rate 68.1%).
-  - Seed 43: selected $\tau = 0.99$ (empirical risk = 0.0032).
-  - Seed 44: selected $\tau = 0.995$ (empirical risk = 0.0016).
-- **UCI-HAR ($\alpha = 0.05$ risk bound):**
-  - Seeds 42, 43, 44 all certified at $\tau = 0.60$ with empirical risk $< 0.015$.
-- *Conclusion:* Statistically guaranteed exit thresholds are valid and consistent across seeds.
+- **CIFAR-10 ($\alpha = 0.02$ risk bound; calibration risk is on the calibration split, "deploy" is the held-out split):**
+
+  | Seed | Selected $\tau$ | Calibration risk | Deploy risk (extra error) | Deploy accuracy (drop) | Exit rate |
+  |---|---|---|---|---|---|
+  | 42 | 0.99 | 0.0030 | 0.0032 | 91.76 % (−0.26 pts) | 68.1 % |
+  | 43 | 0.99 | 0.0040 | 0.0040 | 91.38 % (−0.36 pts) | 68.0 % |
+  | 44 | 0.995 | 0.0034 | 0.0024 | 92.10 % (−0.22 pts) | 63.2 % |
+
+  (An earlier draft listed 0.0032 and 0.0016 for seeds 43 and 44; those were other seeds' values. Corrected from the JSONs.)
+- **UCI-HAR ($\alpha = 0.05$ risk bound):** all 14 grid thresholds are certified for all three seeds, so the selected $\tau = 0.60$ is the grid floor, not a tight bound.
+
+  | Seed | Calibration risk at 0.60 | Deploy accuracy (drop) | Exit rate |
+  |---|---|---|---|
+  | 42 | 0.0081 | 92.13 % (−0.95 pts) | 98.4 % |
+  | 43 | 0.0020 | 92.67 % (−0.14 pts) | 98.6 % |
+  | 44 | 0.0136 | 92.06 % (−1.76 pts) | 99.5 % |
+
+- *Conclusion:* the CIFAR guarantee holds on held-out data for all three seeds with a 0.2–0.4-point accuracy cost. On HAR it holds but is loose (everything certifies), and seed 44 loses 1.76 points.
 
 ---
 
 ### 12.4 Per-Exit Hardware Energy Sweep (Step P3.4, Contribution C1 & C2)
 
-Hardware measurements on RTX 5060 Laptop GPU under locked clock (requested 1500 MHz, observed 1462–1485 MHz in these per-exit windows). 10 randomized windows per cell, each $\ge 3\text{ s}$ and $\ge 1000\text{ iterations}$.
+Hardware measurements on RTX 5060 Laptop GPU under locked clock (requested 1500 MHz, observed 1470–1485 MHz in the per-exit windows; 1447–1485 MHz across the end-to-end windows). 10 randomized windows per cell, each $\ge 3\text{ s}$ and $\ge 1000\text{ iterations}$. **The two tables below are the *cascade* mode** (the deployed path: earlier heads also evaluated, host-side decision each time); the same sweep in *prefix* mode is quoted in the text after them. The "±" here is the audit's 95 % CI half-width.
 
-#### CIFAR-10 Early-Exit ResNet-14 (Seed 42, Session A):
+#### CIFAR-10 Early-Exit ResNet-14 (Seed 42, Session A, cascade mode):
 *Exits 0, 1, 2, and Final Head 3:*
 
-| Batch ($b$) | Exit 0 (mJ) | Exit 1 (mJ) | Exit 2 (mJ) | Final Head 3 (mJ) | $3\sigma$ Adjacent Resolvability | CV (%) | Clock Stability |
+| Batch ($b$) | Exit 0 (mJ) | Exit 1 (mJ) | Exit 2 (mJ) | Final Head 3 (mJ) | $3\sigma$ Adjacent Resolvability | CV (%) | Clock range (`stable=True`) |
 |---|---|---|---|---|---|---|---|
-| **$b = 1$** | $5.079 \pm 0.19$ | $9.304 \pm 0.29$ | $13.702 \pm 0.44$ | $24.779 \pm 0.79$ | **[True, True, True]** (3/3) | 4.3 – 5.1 % | 1485–1485 MHz (`stable=True`) |
-| **$b = 8$** | $1.511 \pm 0.02$ | $2.414 \pm 0.04$ | $3.372 \pm 0.07$ | $4.906 \pm 0.04$ | **[True, True, True]** (3/3) | 1.0 – 3.0 % | 1485–1485 MHz (`stable=True`) |
-| **$b = 16$** | $2.005 \pm 0.03$ | $2.767 \pm 0.03$ | $3.451 \pm 0.04$ | $4.343 \pm 0.09$ | **[True, True, True]** (3/3) | 1.4 – 2.8 % | 1485–1485 MHz (`stable=True`) |
+| **$b = 1$** | $5.079 \pm 0.19$ | $9.304 \pm 0.29$ | $13.702 \pm 0.44$ | $24.779 \pm 0.79$ | **[True, True, True]** (3/3) | 4.3 – 5.1 % | 1470–1485 MHz |
+| **$b = 8$** | $1.511 \pm 0.02$ | $2.414 \pm 0.04$ | $3.372 \pm 0.07$ | $4.906 \pm 0.04$ | **[True, True, True]** (3/3) | 1.0 – 3.0 % | 1470–1477 MHz |
+| **$b = 16$** | $2.005 \pm 0.03$ | $2.767 \pm 0.03$ | $3.451 \pm 0.04$ | $4.343 \pm 0.09$ | **[True, True, True]** (3/3) | 1.4 – 2.8 % | 1477–1477 MHz |
 
-#### UCI-HAR CNN (Seed 42, Session A):
+Prefix mode (run exactly up to head $k$), same session, mJ: $b=1$ 4.833 / 6.959 / 9.551 / 17.544; $b=8$ 1.519 / 2.226 / 3.039 / 4.443; $b=16$ 2.007 / 2.637 / 3.318 / 4.104. All adjacent pairs resolvable in all six cells.
+
+#### UCI-HAR CNN (Seed 42, Session A, cascade mode):
 *Exits 0, 1, and Final Head 2:*
 
 | Batch ($b$) | Exit 0 ($\mu$J) | Exit 1 ($\mu$J) | Final Head 2 ($\mu$J) | $3\sigma$ Adjacent Resolvability | CV (%) |
@@ -633,9 +685,35 @@ Hardware measurements on RTX 5060 Laptop GPU under locked clock (requested 1500 
 | **$b = 1$** | $898.4 \pm 36.8$ | $3051.1 \pm 222.0$ | $5390.8 \pm 252.6$ | **[True, True]** (2/2) | 5.7 – 10.2 % |
 | **$b = 64$** | $22.4 \pm 0.5$ | $67.7 \pm 2.7$ | $118.7 \pm 4.5$ | **[True, True]** (2/2) | 3.3 – 5.6 % |
 
+HAR prefix mode, $\mu$J: $b=1$ 1114 / 1673 / 2593 (**not resolvable**: CV 14–16 %, CIs overlap); $b=64$ 22 / 43 / 67 (resolvable).
+
 *Key Findings:*
 - **Contribution C1 Validated:** On the Blackwell RTX 5060, locking clocks achieves **100% $3\sigma$ resolvability** across all adjacent heads.
 - **Batching Economy:** For CIFAR-10, the full model at $b=8$ (4.39 mJ/sample, end-to-end session A) is **3.4× cheaper** than the best batch-1 early-exit policy (P3, 14.73 mJ) and **4.5× cheaper** than the batch-1 full model (19.70 mJ); at $b=16$ the full model is 5.0× cheaper than at $b=1$. (An earlier draft said "5.05× cheaper than Exit 0 at b=1"; that compared two near-equal numbers, 4.906 vs 5.079 mJ, and was wrong.)
+
+#### 12.4b Seed spot-check at batch 1 (P3.4, seeds 42 / 43 / 44, CIFAR, mJ per sample)
+
+Same protocol, one session each (`eval_cifar10_resnet14_s{42,43,44}_A.json`), all three audit-clean, all adjacent exits resolvable (3/3):
+
+| Mode | Exit 0 | Exit 1 | Exit 2 | Final | Spread across seeds (max−min)/mean |
+|---|---|---|---|---|---|
+| prefix | 4.83 / 4.67 / 4.51 | 6.96 / 7.01 / 6.50 | 9.55 / 9.30 / 8.81 | 17.54 / 17.91 / 17.14 | 4.4 – 8.1 % |
+| cascade | 5.08 / 4.62 / 4.60 | 9.30 / 8.21 / 8.33 | 13.70 / 11.91 / 12.34 | 24.78 / 21.79 / 24.12 | 10.0 – 14.2 % |
+
+The cascade path (the one policies are priced with) varies more across seeds (up to 14 %) than the prefix path (up to 8 %). Seed 42 is the highest in every cascade column, so the cascade-mode numbers in §12.4 should be read as the upper end across seeds. One session per seed, so this mixes seed variation with session-to-session drift.
+
+#### 12.4c Locked vs unlocked contrast (P3.3b, seed 42, b = 1 and 8; `results/p3_unlocked`)
+
+| | Locked (1500 MHz target) | Unlocked (default) |
+|---|---|---|
+| Graphics clock during windows | 1470–1485 MHz | CIFAR b=1: 2767–2790; CIFAR b=8: 2362–2745 (`stable=False`); HAR: 2790–2812 MHz |
+| Adjacent exits resolvable (3σ) | all | **all** (CIFAR and HAR, both modes) |
+| CV (%) | CIFAR 1.0 – 5.1; HAR 2.7 – 10.2, except HAR prefix b=1 at 14–16 | CIFAR 2.7 – 6.2; HAR 2.9 – 9.9 |
+| Energy, unlocked ÷ locked | — | **1.96× – 3.65×** over 22 matched per-exit cells (median 2.9×); CIFAR 1.96–3.65, HAR (b=1 only) 2.76–3.61 |
+
+- The 3070 result "unlocked batch 1 is unresolvable (0/3)" **did not reproduce on this GPU**. Here the unlocked card sat near 2.8 GHz and every pair separated. So on the 5060 the lock does not rescue resolvability; it fixes the operating point and removes the clock as a variable between sessions.
+- The unlocked files were produced at git `7b90eae`, the locked eval/e2e files at `0960180` (training also `7b90eae`). `git diff` between them touches only the clock-check gate (`measure.clock_check`: under-load warm-up thread and the `--lock-mhz` check; plus tests and docs). The energy-window, idle and warm-up code is unchanged.
+- Idle power differed: 15.1 W (CIFAR unlocked), 12.3 W (HAR unlocked) vs 13.6–14.5 W locked, so the idle-subtracted ratios carry about ±1 W of baseline uncertainty on a 14 W idle.
 
 ---
 
@@ -685,15 +763,15 @@ Physical runtime evaluation over the test dataset comparing measured Joules/samp
 When drafting the conference paper, structure the arguments around these concrete findings:
 
 1. **Contribution C3 (The "Table Illusion"):**  
-   Every paper that optimizes early-exit policies using static additive tables is pricing decisions on an illusion. On our measured RTX 5060 platform, the table underestimates energy expenditure by **23% to 45% on CIFAR-10** and by **68% to 89% on UCI-HAR**.
+   Every paper that optimizes early-exit policies using static additive tables is pricing decisions on an illusion. On our measured RTX 5060 platform, the table underestimates energy expenditure by **23% to 54% on CIFAR-10** (23% to 46% under compaction, the deployed mode; 54% is a batch-wait cell) and by **68% to 89% on UCI-HAR**, in all 55 policy cells.
 2. **Contribution C2 (Batching Inversion):**  
-   Early exit only achieves energy reduction at batch 1 (saving at most 25.2% on CIFAR-10). As batch size increases to 8 and 16, the saving collapses and reverses into an energy penalty. Furthermore, running the full unpruned model at batch 8 burns less than a third of the energy of running early-exit at batch 1.
+   Early exit only achieves energy reduction at batch 1 (saving at most 25.2% on CIFAR-10). As batch size increases to 8 and 16, the saving collapses and reverses into an energy penalty. Furthermore, running the full unpruned model at batch 8 costs about 30% of the best batch-1 early exit (3.4× cheaper in session A: 4.39 vs 14.73 mJ; 3.3× in session B: 4.12 vs 13.50 mJ).
 3. **Pervasive Computing Reality (The UCI-HAR Negative Result):**  
    For pervasive/edge applications running tiny models (e.g. 97k-param HAR CNNs), **early exit should not be deployed on GPUs**. The host synchronization and index-selection overhead vastly exceeds the arithmetic cost of the skipped layers, turning a theoretical 90% FLOP saving into a 140% to 240% physical energy increase.
 4. **Reproducibility & Verification Status:**  
    - 20 out of 24 paired cells agree within 10% across sessions.
    - The 4 cells exceeding 10% occur exclusively at $b=1$ on CIFAR (10.4%–11.8% spread; the full-model baseline itself moved 10.4%), reflecting small thermal drift on power-limited laptop silicon.
-   - Checkpoints, training logs, LTT bounds, and raw window traces are fully preserved in `results/p3/`.
+   - Checkpoints, training logs, LTT bounds, and raw window traces are fully preserved in `new_results/results/p3/` (analysis machine) / `results/p3/` (5060 box).
 
 ---
 
@@ -707,4 +785,32 @@ When drafting the conference paper, structure the arguments around these concret
 - **LTT:** HAR certifies every grid threshold down to the floor (τ=0.6), so the selected τ is the grid floor, not a tight bound.
 - **Cascade toll** (final exit, cascade ÷ prefix): CIFAR 1.41× / 1.10× / 1.06× at b=1/8/16; HAR 2.08× / 1.77× at b=1/64.
 - **Operation-count (FLOP) error at exit 0** (predicted − measured saving, points): CIFAR prefix −18.9 / −12.2 / +2.5 and cascade −25.9 / −15.7 / −0.3 at b=1/8/16; HAR prefix +34.4 / +24.9 and cascade +8.1 / +10.3 at b=1/64. KILL-3 (order disagreement) does not fire in any cell.
+
+---
+
+### 12.8 C4 policy benchmark on the 5060 (table-priced, not end-to-end measured)
+
+Each `eval_*_A.json` carries a `kill4` block: policies compared at matched accuracy, priced with the batch-1 **cascade** cost table from the same locked session. "Saving" = cost reduction of the first rule versus the reference rule at the same accuracy; `n` = matched points with a defined reference. Median [min, max], %:
+
+| Model (seed) | Marginal-utility vs global confidence | Marginal-utility vs per-head | Per-head vs global confidence |
+|---|---|---|---|
+| CIFAR (42) | 9.0 [5.1, 12.7], n=9 | 3.3 [−0.1, 10.8], n=9 | 8.3 [0.0, 21.7], n=12 |
+| CIFAR (43) | 9.5 [−37.2, 23.2], n=12 | 5.0 [2.3, 10.0], n=9 | 8.1 [0.0, 19.6], n=12 |
+| CIFAR (44) | 10.6 [4.4, 23.8], n=9 | 6.0 [2.4, 8.9], n=8 | 8.8 [0.0, 22.0], n=12 |
+| HAR (42) | 4.5 [−9.6, 15.6], n=8 | 5.4 [−17.4, 10.1], n=7 | 5.4 [−8.0, 12.3], n=8 |
+
+- Same direction as Phase 2 on CIFAR (§10.5: about 10 % under the locked 3070 table), reproduced on a second GPU and three seeds. A measured cost term makes flexible per-head rules worth roughly 8–10 % at matched accuracy.
+- Marginal-utility is algebraically a per-head confidence rule (`test_units.py`), so its small edge over per-head thresholds (3–6 %) reflects the λ grid versus the threshold grid, not a new decision rule. Do not present it as a controller.
+- These are **table-priced** savings. Section 12.5 shows the table under-prices real policy energy by 23–54 % (CIFAR), so absolute joules here are optimistic. The ranking between rules is not independently confirmed end to end.
+- On HAR the comparison is of limited meaning: every early-exit policy costs more than the full model (§12.5), so "saving versus confidence" ranks policies that are all worse than not exiting.
+
+### 12.9 Provenance and integrity of the Phase 3 files
+
+- **Code versions:** training, LTT and the unlocked contrast ran at git `7b90eae`; locked eval/e2e at `0960180` (only the clock gate changed, §12.4c). Phase 2 used `e83076f`; Phase 1 `0167720` / `5eacc30`.
+- **Sessions:** `p3-eval-cifar-s{42,43,44}`, `p3-eval-har-A`, `p3-e2e-cifar-{A,B}`, `p3-har-A`, `p3-har-b64-B`, `p3-eval-*-s42-U`. Idle baselines 13.6–14.5 W locked.
+- **Co-tenancy:** every locked eval/e2e file records `compute_process_count = 1` and `co_tenant: false` (the benchmark itself). This is a large improvement over the 19–20 background processes in Phase 1/2.
+- **Audit:** `audit verify` passes 8/8 files (`min_repeats 10`, `min_window_s 3`, `min_iters 1000`, clock spread ≤ 30 MHz); `audit compare` finds 4 of 24 repeated cells above 10 %, all CIFAR b = 1 compaction (§12.6).
+- **Not logged:** NVML reports `power_limit_w = −1` on this laptop part, so the AGENTS.md §6 "power limit" field is unavailable and must be stated as such.
+- **Missing:** no 5060 telemetry pilot (counter vs 142 Hz poll, dummy-kernel residual ≤ 5 %). Every window uses the hardware counter (`source: counter`), but AGENTS.md §3 asks for the residual check on the device used. Until the collaborator supplies `pilot.json` (`python src/check_gpu.py --idle-seconds 60 --stress-seconds 30 --session p3-pilot`) the paper must say the 0.16 % residual is for the 3070.
+- **Privacy:** the `co_tenancy.processes` field stores the full path of the Python interpreter, which includes the collaborator's Windows account name. These JSONs are gitignored; scrub that field before sharing any raw result file outside the project (supplementary material, artifact upload, blind-review package).
 
