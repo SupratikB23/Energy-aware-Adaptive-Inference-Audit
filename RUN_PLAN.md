@@ -15,6 +15,21 @@
 > | **D** | remove any controller-novelty claim | already enforced in AGENTS.md / RESEARCH_STATEMENT.md |
 > | **E** | update the research statement with the new evidence | RESEARCH_STATEMENT.md v3 |
 >
+> **PHASE 3 COMPLETION LEDGER (checked against the delivered files, Nov 12 2026; analysis in RESULTS.md §12).**
+>
+> | Step | State | Evidence |
+> |---|---|---|
+> | 0c pilot (`check_gpu.py`, counter vs poll) | ⚠️ **NOT delivered** | no `pilot.json` for the 5060; the 0.16 % residual is a 3070 number. Collaborator: run `python src/check_gpu.py --idle-seconds 60 --stress-seconds 30 --session p3-pilot` |
+> | P3.2 training, 3 seeds | ✅ | 12 checkpoints + JSONs; final-head spread 0.59 (CIFAR) / 1.12 (HAR) pts, under the 1.5 gate |
+> | P3.3 LTT | ✅ | 6 files; CIFAR τ=0.99/0.99/0.995, HAR floor τ=0.60 |
+> | P3.3b unlocked contrast | ✅ | `p3_unlocked/`, 2 files |
+> | P3.4 per-exit eval | ✅ | seed 42 b=1/8/16; seeds 43/44 b=1; HAR b=1/64 |
+> | P3.5 CIFAR e2e | ✅ | session A (b=1/8/16), B (b=1/8) |
+> | P3.6 HAR e2e | ✅ | session A (b=1/64), B (b=64) |
+> | P3.7 audit | ✅ | `verify` 8/8 pass; `compare` 24 cells, 20 within 10 %, 4 outside (all CIFAR b=1) |
+> | P3.8 `nvidia-smi -rgc` | unverifiable | ask the collaborator to confirm the lock was released |
+> | O1–O3 | not run | claims narrowed accordingly |
+>
 > Every command writes to `results/p3/` and every output name carries the training seed
 > (`_s42`, `_s43`, `_s44`) and a `session_id`. Nothing from Phase 1/2 is overwritten.
 >
@@ -233,7 +248,8 @@ foreach ($s in 43,44) {
   RunOnce "results/p3/eval_cifar10_resnet14_s${s}_A.json" { python src/evaluate.py --ckpt "results/p3/cifar10_exit_kd_resnet14_e20_b64_s$s.pt" --dataset cifar10 --batches 1 --repeats 10 --require-pinned-clock --lock-mhz $LOCK --session "p3-eval-cifar-s$s" --run-tag A --results results/p3 }
 }
 ```
-- Each row must show `clock ... 1500-1500 MHz stable=True`, `cv%` in the single digits,
+- Each row must show a clock within 45 MHz of `$LOCK` (the 5060 run showed 1447-1485 MHz around a
+  1500 MHz lock, never exactly `1500-1500`), `stable=True`, `cv%` in the single digits,
   `repeats: 10`, `randomized_order: true`.
 - **KILL-2:** if batch-1 adjacent exits are not resolvable at 10 locked repeats, report it as a C1 limit.
 - `e2e` (next step) reads the additive per-exit table from `eval_cifar10_resnet14_s42_A.json`,
