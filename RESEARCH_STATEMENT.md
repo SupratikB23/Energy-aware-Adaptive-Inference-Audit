@@ -4,10 +4,13 @@ Controlling verdict and full literature matrix:
 [percom2027_literature_matrix_and_verdict.md](percom2027_literature_matrix_and_verdict.md).
 Measured results: [RESULTS.md](RESULTS.md). Run order: [RUN_PLAN.md](RUN_PLAN.md).
 
-> **Phase 3 status (Nov 9, 2026).** P3.1-P3.3b are reported complete on the RTX 5060 (3 training
-> seeds, calibration, unlocked b=1/8 contrast). The locked core P3.4-P3.7 is still pending, so every
-> Phase 2 number below is preliminary and the locked/10-randomized-window protocol is a target, not
-> yet a published result.
+> **Phase 3 status (Nov 12, 2026).** P3.2-P3.7 are complete on the RTX 5060 Laptop GPU (3 training
+> seeds, calibration, unlocked contrast, locked per-exit eval, CIFAR/HAR end-to-end in two sessions,
+> `audit verify` 8/8 pass, `audit compare` 20/24 cells within 10 %); full analysis in RESULTS.md
+> §12. Phase 2 (RTX 3070) stays a labelled, preliminary secondary platform and is never pooled with
+> Phase 3. Still open: no 5060 telemetry pilot (counter vs poll) was delivered, so the 0.16 %
+> residual below is a 3070 number; end-to-end runs cover seed 42 only; CIFAR b=32/64 and HAR b=8-32
+> were not measured.
 
 ## Working title
 **Priced by the Table, Paid at the Meter: a measured-energy audit of early-exit inference on a commodity GPU**
@@ -18,18 +21,21 @@ early-exit policy with an additive table, E_policy ~= sum_h P(exit at h) * cost(
 is FLOPs or a per-exit energy profile, and then optimise decision rules against that price.
 
 We audit the price itself on a commodity GPU, with telemetry we validate first
-(hardware counter vs 142 Hz polling, 0.16 % residual). Phase 3 measures early-exit energy per
+(hardware counter vs 142 Hz polling, 0.16 % residual on the RTX 3070; the 5060 pilot is pending). Phase 3 measures early-exit energy per
 exit, per policy and end to end, across batch sizes, under locked clocks and with 10 randomized
 windows per cell. We cover a CIFAR-10 ResNet and a pervasive-scale HAR CNN (97 k params,
 3.9 MFLOPs, real UCI-HAR smartphone data).
 
 We report:
-- when per-exit energy is resolvable at all, and that this requires a locked clock;
+- when per-exit energy is resolvable at all (on the 3070 batch-1 needed a locked clock; on the 5060
+  the unlocked clock was also resolvable, but the energy was 2-3.6x higher, so locking fixes the
+  operating point rather than resolvability);
 - where FLOP accounting over- or under-states the saving;
 - that the additive per-exit table under-predicts what a real early-exit runtime pays
-  (3-39 % on CIFAR, 53-87 % on HAR in the Phase 2 runs);
-- that batching erases early-exit savings by batch 16 on CIFAR, and that the HAR CNN never
-  saves energy at any batch size under the default and locked clocks tested so far.
+  (3-39 % on CIFAR, 53-87 % on HAR in the Phase 2 runs; 23-54 % and 68-89 % in all 55 Phase 3 policy cells on the 5060);
+- that batching erases early-exit savings (Phase 2: by batch 16; Phase 3: at batch 8 for all but the most
+  aggressive policy), and that the HAR CNN never saves energy at the batch sizes measured
+  (3070: every batch, default and locked clock; 5060: b=1 and b=64, locked).
 
 The marginal-utility controller is audited as an instance of rational metareasoning; the
 decision rule is not the contribution.
@@ -37,18 +43,21 @@ decision rule is not the contribution.
 ## Research questions
 | RQ | Question | Evidence so far | Pending run |
 |---|---|---|---|
-| RQ1 (C1) | Can per-exit GPU energy be measured, and in which regime? | Counter vs poll 0.16 %. Unlocked batch-1: clocks 855-1935 MHz, CV 3-41 %, adjacent exits 0/3 resolvable. **Locked 1500 MHz: clocks 1500-1500, CV 3.9-10.7 %, adjacent exits 3/3 resolvable**, identical-workload mismatch 16-54 % -> 7 %. | Phase 3: 10 repeats + randomized order + 2 independent sessions per headline cell, CIFAR and HAR |
-| RQ2 (C2) | When do FLOPs mispredict early-exit savings? | Order preserved (KILL-3 fired), but the *size* is off: CIFAR -45 to +84 %, HAR -71 to -94 %. Full model at b=64 is cheaper per sample than the earliest exit at b=1. | Locked-clock CIFAR e2e b=1/8/16 (Phase 3, laptop-lite) |
-| RQ3 (C2/C3) | Does the additive table predict what a real early-exit runtime costs, and does batching erase the savings? | **No.** Table under-predicts by 3-39 % (CIFAR) and 53-87 % (HAR). CIFAR early exit saves 18-67 % at b=1 and 18-49 % at b=8; at b=16 it mostly reverses (costs up to 29 %, best case saves 3 %), and b=64 recovers only to 3-15 % saved. HAR costs 6-241 % *more* than full at every batch. Compaction beats batch-wait in 45/48 cells. | Phase 3 (laptop-lite): locked CIFAR e2e b=1/8/16; HAR e2e b=1 and 64 (b=64 in two sessions) |
-| RQ4 (C3) | Does a measured cost term change policy decisions? | Marginal-utility is algebraically per-head confidence thresholds (proved in `test_units.py`). Against per-head it ties (11/12, median 15.1 % under measured cost; 1.8 % under FLOP cost). The measured cost term does not create a new controller; it changes the *price* of the operating points. | 3 seeds; b=1/64 cost table for seeds 43/44 (Phase 3) |
-| RQ5 (C4-lite) | Are certified operating points meaningful energetically? | LTT certifies tau=0.99 at alpha=0.02 (68 % exit early, -0.3 pts). alpha=0.01 is uncertifiable at n=5000 by Hoeffding. | Price certified tau end to end (Phase 3 `--taus 0.97 0.99`) |
+| RQ1 (C1) | Can per-exit GPU energy be measured, and in which regime? | Counter vs poll 0.16 %. Unlocked batch-1: clocks 855-1935 MHz, CV 3-41 %, adjacent exits 0/3 resolvable. **Locked 1500 MHz: clocks 1500-1500, CV 3.9-10.7 %, adjacent exits 3/3 resolvable**, identical-workload mismatch 16-54 % -> 7 % (3070). **5060 (Phase 3):** locked 1470-1485 MHz, 10 randomized windows, CV 1-10 % (HAR prefix b=1: 14-16 %, unresolved), adjacent exits 3/3 (CIFAR) and 2/2 (HAR cascade) resolvable; **unlocked was also resolvable** (clock ~2.8 GHz) at 1.96-3.65x the energy. Cross-session (24 cells): 20 within 10 %, the 4 outliers all CIFAR b=1. | Done (RESULTS §12.4, §12.6). Open: 5060 counter-vs-poll pilot |
+| RQ2 (C2) | When do FLOPs mispredict early-exit savings? | Order preserved (KILL-3 fired), but the *size* is off: CIFAR -45 to +84 %, HAR -71 to -94 %. Full model at b=64 is cheaper per sample than the earliest exit at b=1. | Done on the 5060 (RESULTS §12.4): exit-0 FLOP error -19/-12/+2 pts (prefix) at b=1/8/16 on CIFAR, +34/+25 pts on HAR at b=1/64; no order disagreement. |
+| RQ3 (C2/C3) | Does the additive table predict what a real early-exit runtime costs, and does batching erase the savings? | **No.** Table under-predicts by 3-39 % (CIFAR) and 53-87 % (HAR). CIFAR early exit saves 18-67 % at b=1 and 18-49 % at b=8; at b=16 it mostly reverses (costs up to 29 %, best case saves 3 %), and b=64 recovers only to 3-15 % saved. HAR costs 6-241 % *more* than full at every batch. Compaction beats batch-wait in 45/48 cells. | Done on the 5060 (RESULTS §12.5): table error negative in all 55 policy cells (CIFAR -23 to -54 %, HAR -68 to -89 %). CIFAR: best policy saves 25 % at b=1 (2.3-pt accuracy loss), most policies cost 2-23 % more at b=8/16 (some not significant); HAR costs 2.4-3.4x the full model at b=1 and b=64. Full model at b=8 is 3.4x cheaper than the best b=1 early exit. |
+| RQ4 (C3) | Does a measured cost term change policy decisions? | Marginal-utility is algebraically per-head confidence thresholds (proved in `test_units.py`). Against per-head it ties (11/12, median 15.1 % under measured cost; 1.8 % under FLOP cost). The measured cost term does not create a new controller; it changes the *price* of the operating points. | Done (RESULTS §12.8): 3 seeds, b=1 cost tables; per-head vs global confidence 8.1-8.8 % median saving (CIFAR), 5.4 % (HAR); table-priced, not end-to-end measured |
+| RQ5 (C4-lite) | Are certified operating points meaningful energetically? | LTT certifies tau=0.99 at alpha=0.02 (68 % exit early, -0.3 pts). alpha=0.01 is uncertifiable at n=5000 by Hoeffding. | Done (RESULTS §12.3, §12.5): certified tau=0.99 never saves end to end on the 5060 (b=1 +9.5 %/+7.9 % energy, n.s.; b=8 +15 %/+23 %; b=16 +2.3 %, n.s.). LTT holds on all 3 seeds (CIFAR), loose on HAR (whole grid certifies) |
 
 ## Contributions (what we claim)
 1. **C1: a validated per-exit energy protocol**, and the regime where it fails. The NVML counter is
    cross-checked against polling. Resolvability is reported per batch size with 3-sigma tests,
    randomized window order, >=10 repeats, Student-t 95 % CIs, pinned-clock evidence, co-tenancy
    snapshots and cross-session agreement. The locked-vs-unlocked batch-1 experiment is the
-   protocol's own stress test: locking turns 0/3 resolvable adjacent exits into 3/3.
+   protocol's own stress test: on the 3070 locking turned 0/3 resolvable adjacent exits into 3/3; on
+   the 5060 the unlocked clock was already resolvable, so the honest statement there is that
+   locking removes the clock as a variable (and changes absolute energy 2-3.6x), not that it
+   rescues resolvability.
 2. **C2: a measured regime map of FLOP accounting.** At batch >=16, energy is affine in FLOPs
    (R^2 >= 0.998) with a fixed overhead, so FLOPs overstate savings. At small batch, energy is
    convex in depth, so FLOPs understate them. Measured on a mid-size and a pervasive-scale model.
@@ -93,20 +102,23 @@ decision rule is not the contribution.
 
 ## Threats to validity (state them)
 - Single headline GPU, Windows. Phase 1/2 ran on an RTX 3070 with ~19 background GPU processes;
-  Phase 3 may run on a different card (e.g. RTX 5060). Phase 3 is then a self-contained platform
-  (own checkpoints, own locked clock `$LOCK`, never pooled with 3070 numbers); the 3070 data is
-  reported only as a labelled, preliminary secondary platform. Phase 3 closes background
-  processes and records a co-tenancy snapshot per run. No battery-powered device.
+  Phase 3 ran on an **RTX 5060 Laptop GPU** (power-limited, locked at 1500 MHz, observed 1447-1485 MHz,
+  well below its ~2.8 GHz default boost). Phase 3 is a self-contained platform (own checkpoints, own
+  locked clock, never pooled with 3070 numbers); the 3070 data is reported only as a labelled,
+  preliminary secondary platform. Every Phase 3 file records one compute process (the benchmark itself).
+  Locked numbers are energy at 1500 MHz, not at the default clock. No battery-powered device and no
+  independent power-meter validation; the counter-vs-poll check was done on the 3070 only.
 - Overhead is quantified as measured end-to-end energy minus the additive per-exit prediction
   (`pred_table_err_pct`, a per-cell point value; the measured side carries the 95 % CI), and compaction vs batch-wait. We do **not** decompose it into
   kernel-launch / synchronisation / host-decision time, so any such mechanism is a hypothesis,
   not a measured result.
 - Batch-1 per-exit numbers are DVFS-confounded unless clocks are locked. Phase 2 showed that
-  locking at 1500 MHz fixes resolvability; Phase 3 re-runs every headline cell locked, with
-  `--require-pinned-clock` as a hard gate.
+  locking at 1500 MHz fixes resolvability on the 3070; on the 5060 the unlocked contrast was already
+  resolvable, so the lock matters there for comparability across sessions. Phase 3 re-runs every
+  headline cell locked, with `--require-pinned-clock --lock-mhz` as a hard gate.
 - Phase 2 used 3 repeats and a rotated (not randomized) order. Phase 3 uses >=10 repeats,
   seeded randomized order, Student-t CIs and cross-session comparison. Phase 2 numbers are
-  therefore preliminary and must be reported as such if the Phase 3 runs are not finished.
+  therefore preliminary and are reported as a secondary platform; Phase 3 (5060) is complete and carries the headline claims.
 - One training seed in Phase 1/2. Phase 3 trains 3 seeds for CIFAR and HAR and reports the seed
   spread; hardware measurements are repeated for seed 42 and spot-checked at b=1 for seeds 43/44. Because the measurement GPU is a power-limited laptop part, the
   locked-clock set is reduced to CIFAR b=1/8/16 and HAR b=1/64 (optional extensions cover CIFAR b=32/64 and the HAR middle batches);
