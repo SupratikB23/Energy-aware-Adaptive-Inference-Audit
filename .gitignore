@@ -2,6 +2,7 @@
 data/
 results/
 results_old/
+IEEE-conference-template-062824/
 *.pt
 *.pth
 *.ckpt
