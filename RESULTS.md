@@ -36,7 +36,7 @@ framing and kill criteria:
 | Step | Content | Files | Status | Section |
 |---|---|---|---|---|
 | P3.1 | CPU smoke + unit tests | not a result file | not in the data; run on the dev machine | — |
-| 0c pilot | counter-vs-poll telemetry check on the 5060 | **none delivered** | ⚠️ **missing** (limitation, see §12.7) | — |
+| 0c pilot | counter-vs-poll telemetry check on the 5060 | `p3/pilot.json` (delivered Nov 13; Steam was running, see §13) | ✅ **PASS**, residual 0.13 % ≤ 5 % | §13 |
 | P3.2 | 3 seeds × {CIFAR teacher, CIFAR exit_kd, HAR teacher, HAR exit_kd} | 12 `.json` + 12 `.pt` | ✅ done | §12.2 |
 | P3.3 | LTT per seed (CIFAR α=0.02, HAR α=0.05) | 6 `ltt_*` | ✅ done | §12.3 |
 | P3.3b | unlocked contrast, b=1/8, CIFAR + HAR (seed 42) | 2 `eval_*_U` | ✅ done | §12.4c |
@@ -779,7 +779,7 @@ When drafting the conference paper, structure the arguments around these concret
 
 - **The "±" values in the §12.5 tables are NOT the audit's 95% CI.** They are about half the real half-width (e.g. CIFAR b=1 full model: table says ±0.65, JSON `j_ci95_halfwidth` = 1.31 mJ/1000). Use the paper tables / JSON for any CI. This matters: at b=1 the CIs of the full model and most policies overlap, so only P3 (−25.2% A, −24.0% B) and, in session B only, P2 (−8.2%) are separated from the full model.
 - **Significance (95% CIs vs full model, compaction).** b=8: every policy except P3 costs significantly more in both sessions (+4% to +23%); P3 saves 10.3% (A, significant) but 3.3% (B, not significant). b=16 (A only): P3 saves 9.5% (significant); conf-0.97 and P1 cost more; conf-0.99 and P2 are not significant. The LTT-certified conf-0.99 never saves: b=1 +9.5%/+7.9% (n.s.), b=8 +15.0%/+23.2%, b=16 +2.3% (n.s.).
-- **No telemetry-validation pilot for the 5060 is in `new_results/`.** The 0.16% counter-vs-poll residual (§1) is for the RTX 3070. Every 5060 window records `source: counter` and idle 13.6–14.5 W, but no independent check on this part was provided. **Collaborator to supply `pilot.json` from the 5060 (`check_gpu.py`) or the paper keeps this as a stated limitation.**
+- ~~No telemetry-validation pilot for the 5060~~ **Resolved Nov 13: the pilot was delivered and passes (residual 0.13 %), with one caveat (Steam running). See §13.**
 - **Energy windows use the first 2500 images of the CIFAR-10 deploy split** (all 1474 HAR windows); the runtime's accuracy on that subset equals the offline policy's. Accuracy columns in the paper are over the full 5000-image deploy split.
 - **Unlocked contrast (`p3_unlocked`)** is in §12.1 item 4: unlocked energy 1.96×–3.65× locked; adjacent exits resolvable in every unlocked cell. HAR b=1 *prefix* (locked) is the only unresolved pair (CV 14–16%); the cascade for the same exits is resolvable.
 - **LTT:** HAR certifies every grid threshold down to the floor (τ=0.6), so the selected τ is the grid floor, not a tight bound.
@@ -811,6 +811,72 @@ Each `eval_*_A.json` carries a `kill4` block: policies compared at matched accur
 - **Co-tenancy:** every locked eval/e2e file records `compute_process_count = 1` and `co_tenant: false` (the benchmark itself). This is a large improvement over the 19–20 background processes in Phase 1/2.
 - **Audit:** `audit verify` passes 8/8 files (`min_repeats 10`, `min_window_s 3`, `min_iters 1000`, clock spread ≤ 30 MHz); `audit compare` finds 4 of 24 repeated cells above 10 %, all CIFAR b = 1 compaction (§12.6).
 - **Not logged:** NVML reports `power_limit_w = −1` on this laptop part, so the AGENTS.md §6 "power limit" field is unavailable and must be stated as such.
-- **Missing:** no 5060 telemetry pilot (counter vs 142 Hz poll, dummy-kernel residual ≤ 5 %). Every window uses the hardware counter (`source: counter`), but AGENTS.md §3 asks for the residual check on the device used. Until the collaborator supplies `pilot.json` (`python src/check_gpu.py --idle-seconds 60 --stress-seconds 30 --session p3-pilot`) the paper must say the 0.16 % residual is for the 3070.
+- **Pilot:** delivered Nov 13 and passes (counter vs 141.5 Hz poll, residual 0.13 %). Details and caveats in §13. The 0.16 % figure in §1 remains the 3070 number; the 5060 number is 0.13 %.
 - **Privacy:** the `co_tenancy.processes` field stores the full path of the Python interpreter, which includes the collaborator's Windows account name. These JSONs are gitignored; scrub that field before sharing any raw result file outside the project (supplementary material, artifact upload, blind-review package).
 
+
+---
+
+## 13. RTX 5060 Laptop telemetry pilot (RUN_PLAN Step 0c), delivered Nov 13 2026
+
+Source: `new_results/results/p3/pilot.json` (session `p3-pilot`, git `0960180`, command
+`python src/check_gpu.py --idle-seconds 60 --stress-seconds 30 --session p3-pilot --results results/p3`).
+This closes the one Phase 3 step that was missing (§0 table, §12.9).
+
+### 13.1 Result: PASS
+
+| Check | Value | Gate | Verdict |
+|---|---|---|---|
+| CUDA kernel check | `ok: true`, capability `sm_120`, torch 2.8.0+cu128, CUDA 12.8 | must run on sm_120 | ✅ |
+| Hardware energy counter | `has_energy_counter: true`, `meter_source: counter` | required | ✅ |
+| Validation basis | `counter-vs-poll` (not `poll-only-unverifiable`) | counter-vs-poll | ✅ |
+| **Dummy-kernel residual** | **0.00134 (0.13 %)** = (512.103 J poll − 511.415 J counter) / 511.415 J, 10.0 s window, 1415 samples (141.5 Hz) | ≤ 5 % | ✅ |
+| Idle window (60 s) | counter 821.257 J vs poll 825.571 J (0.53 % apart), idle power **13.69 W**, 8478 samples (141.3 Hz) | none (information) | ✅ consistent with the 13.6–14.5 W idle used in every Phase 3 file |
+| Stress (30 s matmul) | 10 613 iterations; 48 → 62 °C; 13.4 → 51.0 W; average 51.15 W in the validation window | none | ✅ |
+| Driver / GPU | 610.62, RTX 5060 Laptop, 8151 MiB | matches the Phase 3 files | ✅ |
+
+What this establishes: on this part the hardware-integrated counter and 100–200 Hz polling of the
+same NVML interface agree to 0.13 % (stress) and 0.5 % (idle). The earlier 0.16 % (§1) was the
+RTX 3070, so each platform now has its own residual.
+
+What it does **not** establish: both numbers come from NVML, so this is a self-consistency check
+of the counter against polling, not validation against an external meter. The paper limitation
+about an external meter stays.
+
+### 13.2 Caveats found in the file (be honest about these)
+
+1. **Co-tenant present during the pilot.** `co_tenancy.co_tenant: true`, `compute_process_count: 2`:
+   `steam.exe` (pid 23636) plus the benchmark's own Python. Steam also still showed in the
+   post-run compute-app listing. The Phase 3 eval/e2e files all recorded one process (§12.9), so
+   the measurement files are unaffected, but the pilot itself was not run under the "no other GPU
+   process" hygiene of RUN_PLAN Step 0d. A residual of 0.13 % with Steam resident is, if anything,
+   a harder test, but it is not a clean-state run. **Recommended: rerun the pilot once with Steam closed** (12 min), or state the caveat.
+2. **Clock verdict reads `variable` / `pinned: false`.** Cause: the pilot calls `clock_check` with no
+   `--lock-mhz`, so it falls back to the 50 %-of-max rule (floor 1545 MHz) and 1492 MHz is below it.
+   It is not a lock failure: all 8 samples were 1492 MHz, spread 0.0 MHz, and stress-time clocks were
+   1477–1485 MHz, i.e. the same band as the locked Phase 3 windows (1447–1485 MHz). The lock was
+   therefore still applied during the pilot.
+3. **Lock release is not confirmed.** `nvidia-smi -rgc` printed "All done", but the next query still read
+   1492 MHz (identical to the locked value, max 3090 MHz). An idle unlocked GPU normally reads far
+   lower, so the clock may simply have been held by load (Steam) or have not yet settled. The reading
+   neither proves nor disproves the release. RUN_PLAN P3.8 stays "unverifiable" until a re-query
+   after ~10 s of idle shows a clock below ~1000 MHz, or `nvidia-smi -q -d CLOCK` shows no locked limit.
+4. **Power limit still unavailable:** `power_limit_w = −1`, `smi` raw `[N/A]` (same as §12.9).
+5. **Privacy:** `co_tenancy.processes[1].name` contains the collaborator's Windows account name in the
+   interpreter path. The file was moved from the repo root (where git does not ignore it) into the
+   gitignored `new_results/results/p3/`. Scrub that field before sharing it anywhere.
+
+### 13.3 What changes in the paper
+
+- Limitation (iii) can now say: the counter agreed with polling to 0.13 % on this part in a
+  dummy-kernel check; it was not compared with an external meter.
+- Do not claim the pilot ran in a clean state (Steam was resident) unless it is rerun.
+
+### 13.4 Phase 3 status after this file
+
+| Step | State |
+|---|---|
+| 0c pilot | ✅ delivered, PASS (caveat: Steam resident; optional clean rerun) |
+| P3.2–P3.7 | ✅ unchanged (§12) |
+| P3.8 clock release | ⚠️ still unverifiable (§13.2 item 3) |
+| O1–O3 | not run, not needed for the current claims |
