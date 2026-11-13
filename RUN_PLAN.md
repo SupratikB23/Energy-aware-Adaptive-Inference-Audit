@@ -19,7 +19,7 @@
 >
 > | Step | State | Evidence |
 > |---|---|---|
-> | 0c pilot (`check_gpu.py`, counter vs poll) | ⚠️ **NOT delivered** | no `pilot.json` for the 5060; the 0.16 % residual is a 3070 number. Collaborator: run `python src/check_gpu.py --idle-seconds 60 --stress-seconds 30 --session p3-pilot` |
+> | 0c pilot (`check_gpu.py`, counter vs poll) | ✅ delivered Nov 13, PASS (residual 0.13 %) | `p3/pilot.json`; Steam was resident (co_tenant true), optional clean rerun; see RESULTS.md §13 |
 > | P3.2 training, 3 seeds | ✅ | 12 checkpoints + JSONs; final-head spread 0.59 (CIFAR) / 1.12 (HAR) pts, under the 1.5 gate |
 > | P3.3 LTT | ✅ | 6 files; CIFAR τ=0.99/0.99/0.995, HAR floor τ=0.60 |
 > | P3.3b unlocked contrast | ✅ | `p3_unlocked/`, 2 files |
