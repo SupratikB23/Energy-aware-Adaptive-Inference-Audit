@@ -14,6 +14,8 @@ GPU box: exit 1 with FAILED validation if residual > threshold (do not proceed).
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import subprocess
 import sys
 import time
