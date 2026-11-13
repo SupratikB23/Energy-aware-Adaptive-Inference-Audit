@@ -44,7 +44,7 @@ framing and kill criteria:
 | P3.5 | CIFAR end-to-end: session A (b=1/8/16), session B (b=1/8) | `e2e_cifar*_A`, `_B` | ✅ done | §12.5 |
 | P3.6 | HAR eval (b=1/64); e2e A (b=1/64); e2e B (b=64) | `eval_har*_A`, `e2e_har*_A`, `_B` | ✅ done | §12.4, §12.5 |
 | P3.7 | `audit verify` (8 files) and `audit compare` (24 repeated cells) | 2 audit JSONs | ✅ 8/8 pass; 20/24 within 10 % | §12.6 |
-| P3.8 | `nvidia-smi -rgc` (unlock) | none | cannot be verified from files | — |
+| P3.8 | `nvidia-smi -rgc` (unlock) | pilot 2 console output | ✅ release verified (unlocked clock 2160–2182 MHz after the Phase 3 runs) | §13.5 |
 | O1–O3 | CIFAR b=32/64; CIFAR eval session B; HAR b=8/16/32 | none | not run (optional) | claims narrowed |
 
 Not run, so no claim is made: CIFAR b=32/64, HAR b=8/16/32 locked, end-to-end for seeds 43/44, any battery-powered device.
@@ -878,5 +878,98 @@ about an external meter stays.
 |---|---|
 | 0c pilot | ✅ delivered, PASS (caveat: Steam resident; optional clean rerun) |
 | P3.2–P3.7 | ✅ unchanged (§12) |
-| P3.8 clock release | ⚠️ still unverifiable (§13.2 item 3) |
+| P3.8 clock release | ✅ verified by pilot 2 (§13.5); §13.2 item 3 is superseded |
 | O1–O3 | not run, not needed for the current claims |
+
+### 13.5 Second pilot attempt (`p3-pilot-clean`, Nov 13): console output only, JSON not saved
+
+The collaborator reran the pilot. The measurement completed and printed PASS-level numbers, but
+`save_json` then raised `OSError [Errno 22] Invalid argument: 'results\p3\pilot.json'`, so **no JSON
+exists for this run** and the numbers below are transcribed from the console, not from a file. The
+cause is not visible from the traceback (the first run wrote the same path; the folder is under a
+Desktop path that may be synced or locked). `src/check_gpu.py` now writes through `_save_pilot`
+(tries `results/<--out-name>`, then `results/pilot_<session>.json`, then the current folder, and
+prints the JSON if all fail), and has a new `--out-name` flag so a rerun cannot overwrite the first pilot.
+
+| Item | Console value |
+|---|---|
+| Counter vs poll residual (10.0 s, 1417 samples, 141.7 Hz) | **0.165 %** (936.671 J counter, 938.216 J poll), PASS |
+| Idle power | 11.41 W (first pilot, clock locked: 13.69 W) |
+| Stress | 15 497 iterations, 46 → 72 °C, 10.7 → 94.6 W |
+| Clock during validation | **2160 → 2182 MHz** (first pilot, locked: 1477–1485 MHz) |
+| `clock_check` | `variable`, spread 52 MHz (no lock, as expected) |
+| Compute processes | 2 (names not available without the JSON, so Steam's absence is **unconfirmed**) |
+
+Conclusions that are supported:
+- **The lock is released.** Under load the clock reached 2160–2182 MHz and 94 W; a 1500 MHz lock caps
+  it at ≈1485 MHz (§13.1). This settles RUN_PLAN P3.8 (the earlier 1492 MHz idle reading, §13.2
+  item 3, was inconclusive).
+- The counter-vs-poll agreement holds at two operating points: 0.13 % at ≈51 W / 1.48 GHz (locked)
+  and 0.165 % at ≈94 W / 2.17 GHz (default clock).
+- Unlocked idle is lower (11.4 W vs 13.7 W locked), consistent with the locked clock holding idle power up.
+
+Not supported yet: a clean-state pilot (co-tenancy unrecorded). Rerun with `--out-name pilot_clean.json`.
+
+### 13.6 Locked rerun with a JSON (`p3-pilot-clean`, Nov 13): `p3/pilot_clean.json`
+
+The collaborator reran the pilot after re-applying `nvidia-smi -lgc 1500,1500` (the §13.5 run had been
+made unlocked by mistake). He ran the previous `check_gpu.py` (git `24fe5f8`, before the `_save_pilot`
+fix) and this time the file was written. It is stored as `new_results/results/p3/pilot_clean.json`
+(the first pilot stays in `pilot.json`; the file contains the collaborator's Windows account name,
+gitignored, scrub before sharing).
+
+| Item | pilot 1 (locked) | pilot 2 (unlocked, console only) | pilot 3 (locked, JSON) |
+|---|---|---|---|
+| Residual counter vs poll (10 s) | 0.134 % | 0.165 % | **0.131 %** (509.374 J vs 510.041 J, 1419 samples, 141.9 Hz) |
+| Stress power / clock | 51 W, 1477–1485 MHz | 94 W, 2160–2182 MHz | 50.9 W, 1477–1485 MHz |
+| Stress temperature | 48 → 62 °C | 46 → 72 °C | 46 → 60 °C |
+| Idle power (60 s, counter) | 13.69 W | 11.41 W | 13.69 W |
+| Idle counter vs poll | 821.3 vs 825.6 J (0.5 %) | not recorded | 821.3 vs 839.7 J (**2.2 %**, 139.7 Hz) |
+| `clock_check` under load | 1492 MHz ×8 | spread 52 MHz | 1477 MHz ×8, spread 0 |
+| Co-tenants | steam.exe + python | not recorded | steam.exe + python |
+
+Reading:
+- Three runs, two operating points, all ≤ 0.17 % residual against a 5 % limit. Locked runs repeat to
+  within 0.003 percentage points (0.134 % vs 0.131 %). Idle power repeats exactly (13.69 W twice).
+- The **idle** counter-vs-poll gap is 2.2 % in this run (0.5 % in pilot 1). It is a diagnostic, not a
+  gate, and idle is subtracted using the counter, not the poll. It is still within the 5 % scale, but
+  it shows polling is noisier at low power; this is a reason the counter is the primary source.
+- **Still not a clean-state pilot:** `steam.exe` was resident in pilots 1 and 3 (the compute-app listing
+  before this run still showed it). The caveat of §13.2 item 1 stands. The paper must not claim a clean
+  pilot. Steam is a launcher holding a compute context, with no memory reported (`[N/A]`).
+- The validation passes at both clock settings, so the check does not depend on the lock.
+- The earlier `OSError` (§13.5) did not recur for this file; its cause remains unidentified.
+- Lock state at the end of this run: **locked at 1500 MHz** (re-applied for this run). The collaborator
+  should run `nvidia-smi -rgc` again; this affects only his machine, not the paper.
+
+Unit tests after the `check_gpu.py` change: smoke 11 pass / 1 skip; `test_units.py` 97 passed on a
+rerun (an earlier run, concurrent with other jobs, reported 1 failed / 96 passed, test not identified
+and not reproduced; treat as unexplained).
+
+### 13.7 Final state: Phase 3 is closed (Nov 13 2026)
+
+The collaborator's last output was a clock query taken at 12:43:51, right after pilot 3:
+`clocks.gr = 1492 MHz` (SM 1492, memory 810 MHz idle, max 3090 MHz). Reading it correctly:
+
+- It is the **idle clock with the 1500 MHz lock still applied**: pilot 3 was run under a lock he had
+  re-applied, and no `-rgc` was issued afterwards. The same 1492 MHz idle reading appeared in pilot 1
+  (locked) and right after the first `-rgc`, so an idle reading of ~1492 MHz cannot tell locked from
+  unlocked on this laptop. `nvidia-smi -q -d CLOCK` does not show a lock either (the "Applications
+  Clocks" fields report "deprecated"; there is no locked-limit field).
+- **This does not matter for the paper.** The release of the lock after the Phase 3 runs is established
+  by pilot 2 (unlocked, 2160–2182 MHz under load, §13.5), and every Phase 3 result file records its own
+  per-window clocks. The state of his laptop after the pilots is housekeeping (`nvidia-smi -rgc` once,
+  if he has not already) and produces no data.
+
+| Item | Final status |
+|---|---|
+| Phase 3 measurements (P3.2–P3.7) | complete, audited (`verify` 8/8, `compare` 20/24 within 10 %) |
+| Telemetry pilot (0c) | PASS ×3: residual 0.134 % / 0.165 % / 0.131 % (locked / default / locked), caveat: Steam resident |
+| Lock release (P3.8) | verified (pilot 2) |
+| Optional O1–O3 | not run; the paper's wording is narrowed to what was measured |
+| **Collaborator actions remaining** | **none** |
+
+Final caveats that stay in the paper: one laptop GPU; counter checked against polling of the same
+NVML interface, not an external meter; end-to-end runs use one training seed; no CIFAR batch 32/64 or
+HAR batch 8–32; pilot not run in a clean process state; `power_limit_w` unavailable (−1).
+Everything in this file after §12 is final unless new data is supplied.
