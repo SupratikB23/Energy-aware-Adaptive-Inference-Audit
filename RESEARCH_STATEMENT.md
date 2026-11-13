@@ -8,9 +8,10 @@ Measured results: [RESULTS.md](RESULTS.md). Run order: [RUN_PLAN.md](RUN_PLAN.md
 > seeds, calibration, unlocked contrast, locked per-exit eval, CIFAR/HAR end-to-end in two sessions,
 > `audit verify` 8/8 pass, `audit compare` 20/24 cells within 10 %); full analysis in RESULTS.md
 > §12. Phase 2 (RTX 3070) stays a labelled, preliminary secondary platform and is never pooled with
-> Phase 3. Still open: no 5060 telemetry pilot (counter vs poll) was delivered, so the 0.16 %
-> residual below is a 3070 number; end-to-end runs cover seed 42 only; CIFAR b=32/64 and HAR b=8-32
-> were not measured.
+> Phase 3. **Phase 3 is closed: no further runs are planned.** The 5060 telemetry pilot was delivered
+> Nov 13 and passes (counter vs polling 0.13 % locked, 0.17 % at the default clock; RESULTS §13). Remaining
+> limits: end-to-end runs cover seed 42 only; CIFAR b=32/64 and HAR b=8-32 were not measured; no external
+> power meter; the pilot ran with a launcher process (Steam) resident.
 
 ## Working title
 **Priced by the Table, Paid at the Meter: a measured-energy audit of early-exit inference on a commodity GPU**
@@ -21,7 +22,7 @@ early-exit policy with an additive table, E_policy ~= sum_h P(exit at h) * cost(
 is FLOPs or a per-exit energy profile, and then optimise decision rules against that price.
 
 We audit the price itself on a commodity GPU, with telemetry we validate first
-(hardware counter vs 142 Hz polling, 0.16 % residual on the RTX 3070; the 5060 pilot is pending). Phase 3 measures early-exit energy per
+(hardware counter vs 142 Hz polling: 0.16 % residual on the RTX 3070, 0.13 % on the RTX 5060 Laptop). Phase 3 measures early-exit energy per
 exit, per policy and end to end, across batch sizes, under locked clocks and with 10 randomized
 windows per cell. We cover a CIFAR-10 ResNet and a pervasive-scale HAR CNN (97 k params,
 3.9 MFLOPs, real UCI-HAR smartphone data).
@@ -43,7 +44,7 @@ decision rule is not the contribution.
 ## Research questions
 | RQ | Question | Evidence so far | Pending run |
 |---|---|---|---|
-| RQ1 (C1) | Can per-exit GPU energy be measured, and in which regime? | Counter vs poll 0.16 %. Unlocked batch-1: clocks 855-1935 MHz, CV 3-41 %, adjacent exits 0/3 resolvable. **Locked 1500 MHz: clocks 1500-1500, CV 3.9-10.7 %, adjacent exits 3/3 resolvable**, identical-workload mismatch 16-54 % -> 7 % (3070). **5060 (Phase 3):** locked 1470-1485 MHz, 10 randomized windows, CV 1-10 % (HAR prefix b=1: 14-16 %, unresolved), adjacent exits 3/3 (CIFAR) and 2/2 (HAR cascade) resolvable; **unlocked was also resolvable** (clock ~2.8 GHz) at 1.96-3.65x the energy. Cross-session (24 cells): 20 within 10 %, the 4 outliers all CIFAR b=1. | Done (RESULTS §12.4, §12.6). Open: 5060 counter-vs-poll pilot |
+| RQ1 (C1) | Can per-exit GPU energy be measured, and in which regime? | Counter vs poll 0.16 %. Unlocked batch-1: clocks 855-1935 MHz, CV 3-41 %, adjacent exits 0/3 resolvable. **Locked 1500 MHz: clocks 1500-1500, CV 3.9-10.7 %, adjacent exits 3/3 resolvable**, identical-workload mismatch 16-54 % -> 7 % (3070). **5060 (Phase 3):** locked 1470-1485 MHz, 10 randomized windows, CV 1-10 % (HAR prefix b=1: 14-16 %, unresolved), adjacent exits 3/3 (CIFAR) and 2/2 (HAR cascade) resolvable; **unlocked was also resolvable** (clock ~2.8 GHz) at 1.96-3.65x the energy. Cross-session (24 cells): 20 within 10 %, the 4 outliers all CIFAR b=1. | Done (RESULTS §12.4, §12.6, §13). 5060 counter-vs-poll pilot: 0.13 % locked, 0.17 % default clock |
 | RQ2 (C2) | When do FLOPs mispredict early-exit savings? | Order preserved (KILL-3 fired), but the *size* is off: CIFAR -45 to +84 %, HAR -71 to -94 %. Full model at b=64 is cheaper per sample than the earliest exit at b=1. | Done on the 5060 (RESULTS §12.4): exit-0 FLOP error -19/-12/+2 pts (prefix) at b=1/8/16 on CIFAR, +34/+25 pts on HAR at b=1/64; no order disagreement. |
 | RQ3 (C2/C3) | Does the additive table predict what a real early-exit runtime costs, and does batching erase the savings? | **No.** Table under-predicts by 3-39 % (CIFAR) and 53-87 % (HAR). CIFAR early exit saves 18-67 % at b=1 and 18-49 % at b=8; at b=16 it mostly reverses (costs up to 29 %, best case saves 3 %), and b=64 recovers only to 3-15 % saved. HAR costs 6-241 % *more* than full at every batch. Compaction beats batch-wait in 45/48 cells. | Done on the 5060 (RESULTS §12.5): table error negative in all 55 policy cells (CIFAR -23 to -54 %, HAR -68 to -89 %). CIFAR: best policy saves 25 % at b=1 (2.3-pt accuracy loss), most policies cost 2-23 % more at b=8/16 (some not significant); HAR costs 2.4-3.4x the full model at b=1 and b=64. Full model at b=8 is 3.4x cheaper than the best b=1 early exit. |
 | RQ4 (C3) | Does a measured cost term change policy decisions? | Marginal-utility is algebraically per-head confidence thresholds (proved in `test_units.py`). Against per-head it ties (11/12, median 15.1 % under measured cost; 1.8 % under FLOP cost). The measured cost term does not create a new controller; it changes the *price* of the operating points. | Done (RESULTS §12.8): 3 seeds, b=1 cost tables; per-head vs global confidence 8.1-8.8 % median saving (CIFAR), 5.4 % (HAR); table-priced, not end-to-end measured |
@@ -107,7 +108,8 @@ decision rule is not the contribution.
   locked clock, never pooled with 3070 numbers); the 3070 data is reported only as a labelled,
   preliminary secondary platform. Every Phase 3 file records one compute process (the benchmark itself).
   Locked numbers are energy at 1500 MHz, not at the default clock. No battery-powered device and no
-  independent power-meter validation; the counter-vs-poll check was done on the 3070 only.
+  independent power-meter validation. The counter-vs-poll check passed on both GPUs (3070 0.16 %,
+  5060 0.13 %), but both readings come from NVML and the 5060 pilot ran with Steam resident.
 - Overhead is quantified as measured end-to-end energy minus the additive per-exit prediction
   (`pred_table_err_pct`, a per-cell point value; the measured side carries the 95 % CI), and compaction vs batch-wait. We do **not** decompose it into
   kernel-launch / synchronisation / host-decision time, so any such mechanism is a hypothesis,
