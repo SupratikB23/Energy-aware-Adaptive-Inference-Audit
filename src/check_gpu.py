@@ -85,12 +85,33 @@ def _cuda_kernel_check() -> dict:
                         "https://download.pytorch.org/whl/cu128)"}
 
 
+def _save_pilot(info: dict, results: Path, session: str, name: str):
+    """Write the pilot JSON; never lose a finished run to one failed write.
+
+    Tries results/<name>, then results/pilot_<session>.json, then ./pilot_<session>.json.
+    If every write fails (e.g. a synced or locked folder), prints the JSON so it can be copied.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session)
+    for target in (results / name, results / f"pilot_{safe}.json", Path.cwd() / f"pilot_{safe}.json"):
+        try:
+            save_json(info, target)
+            print(f"[pilot] saved {target}", flush=True)
+            return target
+        except OSError as e:
+            print(f"[pilot] WARNING could not write {target}: {e!r}", flush=True)
+    print("[pilot] ERROR no file could be written; full JSON follows, copy it:", flush=True)
+    print(json.dumps(info, indent=2, sort_keys=True, default=str), flush=True)
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Phase 0 GPU pilot")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--idle-seconds", type=float, default=10.0)
     ap.add_argument("--stress-seconds", type=float, default=10.0)
     ap.add_argument("--results", default=None)
+    ap.add_argument("--out-name", default="pilot.json",
+                    help="file name inside --results (use a new name to avoid overwriting an earlier pilot)")
     ap.add_argument("--session", default=None,
                     help="session id (default: $PERCOM_SESSION or generated)")
     args = ap.parse_args()
@@ -121,14 +142,14 @@ def main() -> int:
         info.update({"skipped": True, "reason": "; ".join(reason),
                      "next": "run this file on the RTX GPU box after pip install -r requirements.txt"})
         print(f"[pilot] SKIP ({info['reason']}). No GPU checks possible here — OK for CPU box.", flush=True)
-        save_json(info, results / "pilot.json")
+        _save_pilot(info, results, session, args.out_name)
         return 0
 
     kc = _cuda_kernel_check()
     info["cuda_kernel_check"] = kc
     print(f"[pilot] cuda kernel check: {kc}", flush=True)
     if not kc.get("ok"):
-        save_json(info, results / "pilot.json")
+        _save_pilot(info, results, session, args.out_name)
         print("[pilot] FAIL: CUDA kernels do not run on this GPU with this torch build.", flush=True)
         return 1
 
@@ -138,7 +159,7 @@ def main() -> int:
     except Exception as e:
         info.update({"skipped": False, "nvml_error": repr(e)})
         print(f"[pilot] NVML init FAILED: {e!r}", flush=True)
-        save_json(info, results / "pilot.json")
+        _save_pilot(info, results, session, args.out_name)
         return 1
     try:
         before = nv.device_state().to_dict()
@@ -173,7 +194,7 @@ def main() -> int:
     finally:
         meter.close()
 
-    save_json(info, results / "pilot.json")
+    _save_pilot(info, results, session, args.out_name)
     v = info.get("validation", {})
     if v.get("skipped"):
         # CUDA + pynvml are present here, so a skip means NVML is unusable: that is a FAIL.
