@@ -27,7 +27,8 @@
 > | P3.5 CIFAR e2e | ✅ | session A (b=1/8/16), B (b=1/8) |
 > | P3.6 HAR e2e | ✅ | session A (b=1/64), B (b=64) |
 > | P3.7 audit | ✅ | `verify` 8/8 pass; `compare` 24 cells, 20 within 10 %, 4 outside (all CIFAR b=1) |
-> | P3.8 `nvidia-smi -rgc` | unverifiable | ask the collaborator to confirm the lock was released |
+> | P3.8 `nvidia-smi -rgc` | ✅ release verified | an unlocked pilot after the Phase 3 runs reached 2160-2182 MHz (RESULTS §13.5); the lock was then re-applied only for one pilot rerun |
+| **Phase 3 overall** | **CLOSED (Nov 13 2026)** | no further collaborator runs are needed; O1-O3 stay unrun and the paper wording is narrowed accordingly |
 > | O1–O3 | not run | claims narrowed accordingly |
 >
 > Every command writes to `results/p3/` and every output name carries the training seed
