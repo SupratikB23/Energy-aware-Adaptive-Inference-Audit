@@ -63,5 +63,5 @@ def make(res, out_dir):
     axc.set_xlabel("Batch size, runtime")
     fig.text((left_h + CW * 1.5) / fw, (fh - top - CH * 3 - 0.36) / fh,
              "C = compaction\nW = batch-wait", ha="center", va="top", fontsize=6.5,
-             color=style.GREY)
+             color=style.INK)
     return style.save(fig, out_dir, "fig_table_error")

@@ -120,7 +120,7 @@ def text_overlaps(fig):
     return bad
 
 
-def save(fig, out_dir, name):
+def save(fig, out_dir, name, max_w=COL_W):
     """Save PDF (for LaTeX) and PNG (for checking); raise if any text overlaps."""
     os.makedirs(out_dir, exist_ok=True)
     bad = text_overlaps(fig)
@@ -128,8 +128,8 @@ def save(fig, out_dir, name):
         raise RuntimeError("%s: overlapping text: %s" % (name, bad[:6]))
     pdf = os.path.join(out_dir, name + ".pdf")
     w_in = fig.get_tightbbox(fig.canvas.get_renderer()).width + 2 * 0.02
-    if w_in > COL_W + 1e-3:
-        raise RuntimeError("%s: %.2f in wide, exceeds the %.1f in column" % (name, w_in, COL_W))
+    if w_in > max_w + 1e-3:
+        raise RuntimeError("%s: %.2f in wide, exceeds %.2f in" % (name, w_in, max_w))
     fig.savefig(pdf, bbox_inches="tight", pad_inches=0.02)
     fig.savefig(os.path.join(out_dir, name + ".png"), bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)

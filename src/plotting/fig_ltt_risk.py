@@ -22,7 +22,7 @@ def _panel(ax, res, dataset, title):
             ax.plot([sel], rs, marker=marker, ms=5.5, mfc="none", mec=color, mew=0.9, ls="")
     ax.axhline(100 * alpha, color=style.GREY, ls="--", lw=0.7)
     ax.text(0.03, 100 * alpha - 0.15, r"$\alpha$ = %g%%" % (100 * alpha), transform=ax.get_yaxis_transform(),
-            ha="left", va="top", fontsize=6.5, color=style.GREY)
+            ha="left", va="top", fontsize=6.5, color=style.INK)
     ax.set_title(title, pad=2)
     ax.set_xlabel(r"Confidence threshold $\tau$")
 
